@@ -1,0 +1,527 @@
+package org.signserver.validationservice.server;
+
+import org.signserver.common.*;
+import org.signserver.common.util.*;
+import org.signserver.common.dbdao.*;
+import org.signserver.ejb.interfaces.IWorkerSession;
+import org.signserver.server.WorkerContext;
+import org.signserver.server.signers.BaseSigner;
+
+import javax.persistence.EntityManager;
+
+import org.signserver.server.archive.Archivable;
+import org.signserver.server.archive.DefaultArchivable;
+
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.DataOutputStream;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.Security;
+import java.security.cert.CertificateExpiredException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.CertificateNotYetValidException;
+import java.security.cert.X509Certificate;
+import java.util.*;
+
+import javax.xml.bind.DatatypeConverter;
+
+import org.openxml4j.opc.Package;
+import org.openxml4j.exceptions.InvalidFormatException;
+import org.openxml4j.exceptions.OpenXML4JException;
+import org.openxml4j.opc.PackageAccess;
+import org.openxml4j.opc.PackagePart;
+import org.openxml4j.opc.signature.PackageDigitalSignature;
+import org.openxml4j.opc.signature.PackageDigitalSignatureManager;
+import org.openxml4j.opc.signature.VerifyResult;
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.ocsp.OCSPObjectIdentifiers;
+import org.bouncycastle.asn1.x509.X509Extension;
+import org.bouncycastle.asn1.x509.X509Extensions;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.ocsp.BasicOCSPResp;
+import org.bouncycastle.ocsp.CertificateID;
+import org.bouncycastle.ocsp.OCSPReq;
+import org.bouncycastle.ocsp.OCSPReqGenerator;
+import org.bouncycastle.ocsp.OCSPResp;
+import org.bouncycastle.ocsp.OCSPRespStatus;
+import org.bouncycastle.ocsp.SingleResp;
+import org.odftoolkit.odfdom.doc.OdfDocument;
+import org.odftoolkit.odfdom.pkg.signature.DocumentSignature;
+import org.odftoolkit.odfdom.pkg.signature.DocumentSignatureGroup;
+import org.odftoolkit.odfdom.pkg.signature.DocumentSignatureManager;
+import org.odftoolkit.odfdom.pkg.signature.DocumentSignatureVerifyResult;
+import org.odftoolkit.odfdom.pkg.signature.SignatureCreationMode;
+
+import java.sql.SQLException;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+
+import org.apache.log4j.Logger;
+import org.signserver.server.BaseProcessable;
+import org.signserver.validationservice.common.ValidateRequest;
+import org.signserver.validationservice.common.ValidationServiceConstants;
+
+
+
+public class OOXMLValidator extends BaseProcessable {
+	private IValidationService validationService;
+    private List<String> fatalErrors;
+    private static final Logger LOG = Logger.getLogger(OOXMLValidator.class);
+    
+	private static final String CONTENT_TYPE = "text/xml";
+	private int ResponseCode = Defines.CODE_INVALIDSIGNATURE;;
+	private String ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+	private static String WORKERNAME = "OOXMLValidator";
+	private List<SignerInfoResponse> listSignerInfoResponse;
+	@Override
+	public void init(int workerId, WorkerConfig config,
+			WorkerContext workerContext, EntityManager workerEM) {
+		// TODO Auto-generated method stub
+		super.init(workerId, config, workerContext, workerEM);
+        fatalErrors = new LinkedList<String>();
+        
+        try {
+            validationService = createValidationService(config);
+        } catch (SignServerException e) {
+            final String error = "Could not get crypto token: " + e.getMessage();
+            LOG.error(error);
+            fatalErrors.add(error);
+        }
+	}
+	
+    /**
+     * Creating a Validation Service depending on the TYPE setting
+     * @param config configuration containing the validation service to create
+     * @return a non initialized group key service.
+     */
+    private IValidationService createValidationService(WorkerConfig config) throws SignServerException {
+        String classPath = config.getProperties().getProperty(ValidationServiceConstants.VALIDATIONSERVICE_TYPE, ValidationServiceConstants.DEFAULT_TYPE);
+        IValidationService retval = null;
+        String error = null;
+        try {
+            if (classPath != null) {
+                Class<?> implClass = Class.forName(classPath);
+                retval = (IValidationService) implClass.newInstance();
+                retval.init(workerId, config, em, getCryptoToken());
+            }
+        } catch (ClassNotFoundException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            //DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, "SYSTEM", "[ClassNotFoundException] "+error, 214);
+            LOG.error(error, e);
+            
+        } catch (IllegalAccessException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            //DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, "SYSTEM", "[IllegalAccessException] "+error, 214);
+            LOG.error(error, e);
+        } catch (InstantiationException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            //DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, "SYSTEM", "[InstantiationException] "+error, 214);
+            LOG.error(error, e);
+            
+        }
+
+        if (error != null) {
+            fatalErrors.add(error);
+        }
+        
+        return retval;
+    }
+    
+    /**
+     * @see org.signserver.server.BaseProcessable#getStatus()
+     */
+    @Override
+    public WorkerStatus getStatus(final List<String> additionalFatalErrors) {
+        return validationService.getStatus();
+    }
+
+    @Override
+    protected List<String> getFatalErrors() {
+        final List<String> errors = new LinkedList<String>();
+        
+        errors.addAll(super.getFatalErrors());
+        errors.addAll(fatalErrors);
+
+        return errors;
+    }
+    
+
+	@Override
+	public ProcessResponse processData(ProcessRequest signRequest,
+			RequestContext requestContext) throws IllegalRequestException,
+			CryptoTokenOfflineException, SignServerException {
+		// TODO Auto-generated method stub
+
+		ProcessResponse signResponse;
+		// Check that the request contains a valid GenericSignRequest object
+		// with a byte[].
+		//final String userContract = RequestMetadata.getInstance(requestContext).get("UsernameContract");
+		
+		if (!(signRequest instanceof GenericSignRequest)) {
+			//DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, userContract, "[IllegalRequestException] Server: Recieved request wasn't a expected GenericSignRequest.", 201);
+		    throw new IllegalRequestException(
+		            "Recieved request wasn't a expected GenericSignRequest.");
+		}
+		
+		final ISignRequest sReq = (ISignRequest) signRequest;
+		if (!(sReq.getRequestData() instanceof byte[])) {
+			//DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, userContract, "[IllegalRequestException] Server: Recieved request data wasn't a expected byte[].", 202);
+		    throw new IllegalRequestException(
+		            "Recieved request data wasn't a expected byte[].");
+		}
+		    
+		byte[] data = (byte[]) sReq.getRequestData();
+		final String archiveId = createArchiveId(data, (String) requestContext.get(RequestContext.TRANSACTION_ID));
+//		if(DBConnector.getInstances().getAgreementStatusUser(userContract) != 1)
+//		{
+//			return new GenericSignResponse(sReq.getRequestID(), archiveId, 212, "Contract is locked or invalid");
+//		}
+//		statisticTimeOfValidating(userContract);
+		
+		String channelName = RequestMetadata.getInstance(requestContext).get(Defines._CHANNEL);
+        String user = RequestMetadata.getInstance(requestContext).get(Defines._USER);
+        
+		Security.addProvider(new BouncyCastleProvider());
+		ArrayList<Ca> caProviders = new ArrayList<Ca>();
+		listSignerInfoResponse = new ArrayList<SignerInfoResponse>();
+		caProviders = DBConnector.getInstances().getCAProviders();
+		
+		boolean isVerified = false;
+		try {
+			String serialNumber = getSerialNumber(requestContext);
+			
+			isVerified = Verify(channelName, user, data, serialNumber, caProviders);
+		} catch(Exception e) {
+			e.printStackTrace();
+						e.printStackTrace();
+			return new GenericSignResponse(sReq.getRequestID(), archiveId
+					, Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM+": "+e.getMessage());
+		}
+
+		byte[] byteResponse;
+		if(isVerified)
+			byteResponse = "OK".getBytes();
+		else
+			byteResponse = "FAILED".getBytes();
+
+		final Collection<? extends Archivable> archivables = Arrays.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE, CONTENT_TYPE, byteResponse, archiveId));
+
+
+        	if (signRequest instanceof GenericServletRequest) {
+           		signResponse = new GenericServletResponse(sReq.getRequestID(), byteResponse, getSigningCertificate(), archiveId, archivables, CONTENT_TYPE);
+	        } else {
+	        	signResponse = new GenericSignResponse(sReq.getRequestID(), byteResponse
+	        			, getSigningCertificate(), null, archiveId, archivables
+	        			, ResponseCode, ResponseMessage, listSignerInfoResponse);
+        	}
+
+	        return signResponse;
+	}
+	public boolean Verify(String channelName, String user, byte[] ooxmlfile, String serialNumber, ArrayList<Ca> caProviders) throws Exception
+	{
+		
+		
+		Package docxpackage = Package.open(new ByteArrayInputStream(ooxmlfile)
+										, PackageAccess.READ_WRITE);
+		
+	    PackageDigitalSignatureManager dsm = new PackageDigitalSignatureManager(docxpackage);
+	    
+	    if(!dsm.getIsSigned()) {
+        	ResponseCode = Defines.CODE_SIGNEDDOC;
+        	ResponseMessage = Defines.ERROR_SIGNEDDOC;
+	    	return false;
+	    }
+	    BigInteger serialNo = new BigInteger(serialNumber, 16);
+	    boolean isSignatureValid = false;
+	    
+	    List<PackageDigitalSignature> pks = dsm.getSignatures();
+	    for(int i=0; i<pks.size(); i++)
+	    {
+	    	VerifyResult verifyResult = dsm.VerifySignatures();
+	    	isSignatureValid = isSignatureValid || (verifyResult==VerifyResult.Success?true:false);
+	    	X509Certificate cert = pks.get(i).getSigner();
+	    	
+	    	try {
+				cert.checkValidity(new Date());
+			}catch(CertificateExpiredException  ex) {
+				ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+	            ResponseMessage = Defines.ERROR_EXPIREDCERT;
+	            return false;
+			}catch(CertificateNotYetValidException ex) {
+				ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+	            ResponseMessage = Defines.ERROR_NOTVALIDCERT;
+	            return false;
+			}
+	    	
+	    	if(serialNo.compareTo(cert.getSerialNumber()) ==0)
+	    	{
+	        	String issuer = cert.getIssuerDN().toString();
+	        	String issuerName = "";
+	        	String[] pairs = issuer.split(",");
+	        	for(String pair : pairs)
+	        	{
+	        		String[] paramvalue = pair.split("=");
+	        		if(paramvalue[0].compareTo("CN")==0 || paramvalue[0].compareTo(" CN")==0)
+	        		{
+	        			issuerName = paramvalue[1];
+	        			break;
+	        		}
+	        	}
+	        	String caCertificate = "";
+	        	String caCertificate2 = "";
+	        	String ocspURL = "";
+	        	String crlUrl = "";
+	        	int endpointConfigId = -1;
+	        	if(issuerName.compareTo("") != 0)
+	        	{
+	        		for(Ca ca : caProviders)
+	        		{
+	        			if(ca.getCaDesc().compareTo(issuerName) == 0)
+	        			{
+	        				ocspURL = ca.getCaDesc();
+	        				caCertificate = ca.getCert();
+	        				crlUrl = ca.getCrlPath();
+	        				caCertificate2 = ca.getCert2();
+	        				endpointConfigId = ca.getEndPointConfigID();
+	        				break;
+	        			}
+	        		}
+	        	}
+	        	else
+	        	{
+					ResponseCode = Defines.CODE_INVALIDISSUERCERT;
+					ResponseMessage = Defines.ERROR_INVALIDISSUERCERT;
+	        		return false;
+	        	}
+	        	int methodValidateCert = DBConnector.getInstances().getMethodValidateCert(issuerName);
+	        	
+	        	// only use crl checking for docs validation
+	        	if(methodValidateCert != 1) {
+	        		methodValidateCert = 0;
+	        	}
+	        	
+	        	SignerInfoResponse signerInfoRes = new SignerInfoResponse(
+	        			DatatypeConverter.printBase64Binary(cert.getEncoded())
+	        			, cert.getSerialNumber().toString(16)
+						, getCNFromDN(cert.getIssuerDN().getName())
+						, getCNFromDN(cert.getSubjectDN().getName())
+						, cert.getNotBefore()
+						, cert.getNotAfter());
+	        	listSignerInfoResponse.add(signerInfoRes);
+	        	switch(methodValidateCert)
+	        	{
+	        		case 0: //Only signature
+	        			System.out.println("Only signature validation");
+						if(isSignatureValid) {
+							ResponseCode = Defines.CODE_SUCCESS;
+							ResponseMessage = Defines.SUCCESS;
+						}
+						else {
+							ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+							ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+						}
+	        			return isSignatureValid;
+	        		case 1: //Signature and Cert via CRL
+	        			System.out.println("Signature validation and Certificate validation by CRL");
+	        			if(crlUrl.compareTo("")!=0 && caCertificate.compareTo("") !=0)
+	        			{
+	        				X509Certificate subX509 = cert;
+	        				
+	    	        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+	    	        		
+	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	        			if(caCertificate2 == null || caCertificate2.compareTo("") != 0) {
+	    	    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+	    	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+	    				        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+	    				        		return false;
+	    	    	        		}
+	    	        			} else {
+	    	        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+	    			        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+	    			        		return false;
+	    	        			}
+	    	        		}
+			        		
+			        		
+			        		CRLStatus CRLVarification = CertificateStatus.getInstance().checkCRLCertificate(subX509, crlUrl);
+							if(!CRLVarification.getIsRevoked() && isSignatureValid)
+							{
+								ResponseCode = Defines.CODE_SUCCESS;
+								ResponseMessage = Defines.SUCCESS;
+							}
+							else
+							{
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+							}
+	        				return (!CRLVarification.getIsRevoked() && isSignatureValid);
+	        			}
+	        			else
+	        			{
+		        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+				        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+	        			}
+	        			break;
+	        		case 2: //Signature and Cert via OCSP
+	        			System.out.println("Signature validation and Certificate validation by OCSP");
+			        	if(ocspURL.compareTo("") != 0 && caCertificate.compareTo("") !=0)
+			        	{
+			        		System.out.println("Verifying: Checking ocsp");
+			        		X509Certificate subX509 = cert;
+		   
+			        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+			        		
+			        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+			        			if(caCertificate2 == null || caCertificate2.compareTo("") != 0) {
+	
+			    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+			    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+			    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+						        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+						        		return false;
+			    	        		}
+			        			} else {
+			        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+					        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+					        		return false;
+			        			}
+			        		}
+			        		boolean ocspStatus = false;
+			        		int retryNumber = DBConnector.getInstances().getNumberOCSPReTry(issuerName);
+			        		OcspStatus ocsp_status = CertificateStatus.getInstance().checkRevocationStatus(channelName, user, ocspURL, subX509, caX509, retryNumber, endpointConfigId);
+			        		ocspStatus = ocsp_status.getIsValid();
+							if(ocspStatus && isSignatureValid) {
+								ResponseCode = Defines.CODE_SUCCESS;
+								ResponseMessage = Defines.SUCCESS;
+							} else {
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+							}
+			        		return (ocspStatus && isSignatureValid);
+			        	}
+			        	else
+			        	{
+							ResponseCode = Defines.CODE_INVALIDCAINFO;
+							ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+			        	}
+	        			break;
+	        		default: // Signature and OCSP, if OCSP failure check CRL
+	        			System.out.println("Signature validation and Certificate validation by OCSP (CRL if OCSP failure)");
+	        			if(crlUrl.compareTo("") != 0 && ocspURL.compareTo("") != 0 && caCertificate.compareTo("") !=0)
+			        	{
+	        				X509Certificate subX509 = cert;
+	        				
+	    	        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+	    	        		
+	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	        			if(caCertificate2 == null || caCertificate2.compareTo("") != 0) {
+	    	        				
+	    	    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+	    	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+	    				        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+	    				        		return false;
+	    	    	        		}
+	    	        			} else {
+	    	        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+	    			        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+	    			        		return false;
+	    	        			}
+	    	        		}
+	    	        		
+			        		boolean ocspStatus = false;
+			        		boolean crlStatus = false;
+			        		int retryNumber = DBConnector.getInstances().getNumberOCSPReTry(issuerName);
+			        		OcspStatus ocsp_status = CertificateStatus.getInstance().checkRevocationStatus(channelName, user, ocspURL, subX509, caX509, retryNumber, endpointConfigId);
+			        		if(ocsp_status.getCertificateState().equals(OcspStatus.ERROR))
+			        		{
+			        			CRLStatus CRLVarification = CertificateStatus.getInstance().checkCRLCertificate(subX509, crlUrl);
+			        			crlStatus = !CRLVarification.getIsRevoked();
+								if(crlStatus && isSignatureValid)
+								{
+									ResponseCode = Defines.CODE_SUCCESS;
+									ResponseMessage = Defines.SUCCESS;
+								}
+								else
+								{
+									ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+									ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								}
+			        			return (crlStatus && isSignatureValid);
+			        		}
+			        		else {
+			        			ocspStatus = ocsp_status.getIsValid();
+								if(ocspStatus && isSignatureValid) {
+									ResponseCode = Defines.CODE_SUCCESS;
+									ResponseMessage = Defines.SUCCESS;
+								} else {
+									ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+									ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								}
+			        		}
+			        		
+			        		return (ocspStatus && isSignatureValid);
+			        	}
+	        			else
+	        			{
+							ResponseCode = Defines.CODE_INVALIDCAINFO;
+							ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+	        			}
+	        			break;
+	        	}
+	    	}
+	    	else
+	    	{
+				ResponseCode = Defines.CODE_INVALIDCERTSERIAL;
+				ResponseMessage = Defines.ERROR_INVALIDCERTSERIAL;
+	    	}
+	    }
+	    
+	    return false;
+	}
+	
+	private static String getCNFromDN(String DN)
+    {
+    	String CN = "";
+    	String[] pairs = DN.split(",");
+    	for(String pair : pairs)
+    	{
+    		String[] paramvalue = pair.split("=");
+    		if(paramvalue[0].compareTo("CN")==0 || paramvalue[0].compareTo(" CN")==0)
+    		{
+    			CN = paramvalue[1];
+    			break;
+    		}
+    	}
+    	return CN;
+    }
+	
+    private String getSerialNumber(final RequestContext context) {
+    	final String data = RequestMetadata.getInstance(context).get("certSerialNumber");
+    	return data;
+    }	
+
+    private boolean checkDataValidity(X509Certificate x509) {
+		try {
+			x509.checkValidity();
+			return true;
+		} catch(CertificateExpiredException e) {
+			e.printStackTrace();
+			
+		} catch (CertificateNotYetValidException e) {
+			e.printStackTrace();
+		}
+		return false;
+	}
+}

@@ -1,0 +1,52 @@
+<project name="SignServer-Module-PKCS#1" basedir="." default="default">
+    <description>Builds and runs the project SignServer-Module-PKCS#1.</description>
+    <import file="../modules.xml"/>
+    <target name="clean">
+        <delete dir="build"/>
+        <delete dir="dist" followsymlinks="false" includeemptydirs="true"/>
+	<delete dir="../../lib/SignServer-Module-PKCS#1.jar"/>
+    </target>
+
+    <target name="-do-module">
+	<echo>Module: SignServer-Module-PKCS#1</echo>
+	<property name="src.dir"     value="src"/>
+	<property name="build.dir"   value="build"/>
+	<property name="dist.dir"    value="dist"/>
+	<property name="lib.dir"     value="../../lib"/>
+	<property name="main-class"  value="org.signserver.module.pkcs1.PKCS1Signer"/>
+	<mkdir dir="${build.dir}"/>
+	<mkdir dir="${dist.dir}"/>
+
+	<path id="main-classpath">
+		<fileset dir="${lib.dir}">
+			<include name="*.jar"/>
+		</fileset>
+
+		<fileset dir="${lib.dir}/ext">
+			<include name="*.jar"/>
+		</fileset>
+
+		<fileset dir="${lib.dir}/ext/hibernate">
+			<include name="*.jar"/>
+		</fileset>
+
+		<fileset dir="${lib.dir}/ext/ext/ejb">
+			<include name="*.jar"/>
+		</fileset>
+
+		<pathelement path="${build.dir}"/>
+	</path>
+
+	<javac srcdir="${src.dir}" destdir="${build.dir}" includeantruntime="false">
+		<classpath refid="main-classpath"/>
+	</javac>
+        <jar destfile="${dist.dir}/${ant.project.name}.jar" basedir="${build.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="${main-class}"/>
+            </manifest>
+        </jar>
+	<copy todir="../../lib" failonerror="true" file="${dist.dir}/${ant.project.name}.jar"/>
+    </target>
+
+
+</project>

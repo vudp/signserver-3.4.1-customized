@@ -1,0 +1,618 @@
+package org.signserver.validationservice.server;
+
+import org.signserver.common.*;
+import org.signserver.common.util.*;
+import org.signserver.common.dbdao.*;
+import org.signserver.ejb.interfaces.IWorkerSession;
+import org.signserver.server.WorkerContext;
+import org.signserver.server.signers.BaseSigner;
+
+import javax.persistence.EntityManager;
+
+import org.signserver.server.archive.Archivable;
+import org.signserver.server.archive.DefaultArchivable;
+
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.math.BigInteger;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.*;
+import java.security.cert.CertStore;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateExpiredException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.CertificateNotYetValidException;
+import java.security.cert.X509Certificate;
+import java.sql.SQLException;
+import java.util.*;
+
+import javax.xml.bind.DatatypeConverter;
+
+import org.bouncycastle.asn1.DEROctetString;
+import org.bouncycastle.asn1.cms.CMSAttributes;
+import org.bouncycastle.asn1.cms.Time;
+import org.bouncycastle.asn1.ocsp.OCSPObjectIdentifiers;
+import org.bouncycastle.asn1.x509.X509Extension;
+import org.bouncycastle.asn1.x509.X509Extensions;
+import org.bouncycastle.asn1.x509.X509Name;
+import org.bouncycastle.cert.X509CertificateHolder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.ocsp.BasicOCSPResp;
+import org.bouncycastle.ocsp.OCSPResp;
+import org.bouncycastle.ocsp.SingleResp;
+import org.bouncycastle.cms.CMSException;
+import org.bouncycastle.cms.CMSProcessableByteArray;
+import org.bouncycastle.cms.CMSSignedData;
+import org.bouncycastle.cms.SignerInformation;
+import org.bouncycastle.cms.SignerInformationStore;
+import org.bouncycastle.cms.jcajce.JcaSimpleSignerInfoVerifierBuilder;
+import org.bouncycastle.jce.PrincipalUtil;
+import org.bouncycastle.jce.X509Principal;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.ocsp.CertificateID;
+import org.bouncycastle.cert.ocsp.OCSPException;
+import org.bouncycastle.ocsp.OCSPReqGenerator;
+import org.bouncycastle.ocsp.OCSPReq;
+import org.bouncycastle.ocsp.OCSPRespStatus;
+import org.bouncycastle.operator.OperatorCreationException;
+import org.bouncycastle.util.Store;
+
+import java.sql.SQLException;
+import java.util.LinkedList;
+import java.util.List;
+
+import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.log4j.Logger;
+import org.signserver.server.BaseProcessable;
+import org.signserver.validationservice.common.ValidateRequest;
+import org.signserver.validationservice.common.ValidationServiceConstants;
+
+
+
+public class PKCS1Validator extends BaseProcessable {
+
+    private IValidationService validationService;
+    private List<String> fatalErrors;
+    private static final Logger LOG = Logger.getLogger(PKCS1Validator.class);
+    
+	private static final String CONTENT_TYPE = "text/xml";
+	private int ResponseCode = Defines.CODE_INVALIDSIGNATURE;;
+	private String ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+	private static String WORKERNAME = "PKCS1Validator";
+	private List<SignerInfoResponse> listSignerInfoResponse;
+	@Override
+	public void init(int workerId, WorkerConfig config,
+			WorkerContext workerContext, EntityManager workerEM) {
+		// TODO Auto-generated method stub
+		super.init(workerId, config, workerContext, workerEM);
+        fatalErrors = new LinkedList<String>();
+        try {
+            validationService = createValidationService(config);
+        } catch (SignServerException e) {
+            final String error = "Could not get crypto token: " + e.getMessage();
+            LOG.error(error);
+            fatalErrors.add(error);
+        }
+	}
+	
+    /**
+     * Creating a Validation Service depending on the TYPE setting
+     * @param config configuration containing the validation service to create
+     * @return a non initialized group key service.
+     */
+    private IValidationService createValidationService(WorkerConfig config) throws SignServerException {
+        String classPath = config.getProperties().getProperty(ValidationServiceConstants.VALIDATIONSERVICE_TYPE, ValidationServiceConstants.DEFAULT_TYPE);
+        IValidationService retval = null;
+        String error = null;
+        try {
+            if (classPath != null) {
+                Class<?> implClass = Class.forName(classPath);
+                retval = (IValidationService) implClass.newInstance();
+                retval.init(workerId, config, em, getCryptoToken());
+            }
+        } catch (ClassNotFoundException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            LOG.error(error, e);
+            
+        } catch (IllegalAccessException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            LOG.error(error, e);
+        } catch (InstantiationException e) {
+            error = "Error instatiating Validation Service, check that the TYPE setting of workerid : " + workerId + " have the correct class path.";
+            LOG.error(error, e);
+            
+        }
+
+        if (error != null) {
+            fatalErrors.add(error);
+        }
+        
+        return retval;
+    }
+    
+
+	@Override
+	public ProcessResponse processData(ProcessRequest signRequest,
+			RequestContext requestContext) throws IllegalRequestException,
+			CryptoTokenOfflineException, SignServerException {
+		// TODO Auto-generated method stub
+		ProcessResponse signResponse;
+		if (!(signRequest instanceof GenericSignRequest)) {
+		    throw new IllegalRequestException("Recieved request wasn't a expected GenericSignRequest.");
+		}
+		
+		final ISignRequest sReq = (ISignRequest) signRequest;
+		if (!(sReq.getRequestData() instanceof byte[])) {
+		    throw new IllegalRequestException("Recieved request data wasn't a expected byte[].");
+		}
+		    
+		byte[] signature = (byte[]) sReq.getRequestData();
+		final String archiveId = createArchiveId(signature, (String) requestContext.get(RequestContext.TRANSACTION_ID));
+
+		// check license for CapicomValidator
+        LOG.info("Checking license for PKCS1Validator.");
+        License licInfo = License.getInstance();
+        if(licInfo.getStatusCode() != 0) {
+        	return new GenericSignResponse(sReq.getRequestID(), archiveId, Defines.CODE_INFO_LICENSE, licInfo.getStatusDescription());
+        } else {
+        	if(!licInfo.checkWorker(WORKERNAME)) {
+        		return new GenericSignResponse(sReq.getRequestID(), archiveId
+        				, Defines.CODE_INFO_LICENSE_NOTSUPPORT, Defines.ERROR_INFO_LICENSE_NOTSUPPORT);
+        	}
+        }
+        
+        String channelName = RequestMetadata.getInstance(requestContext).get(Defines._CHANNEL);
+        String user = RequestMetadata.getInstance(requestContext).get(Defines._USER);
+		
+		Security.addProvider(new BouncyCastleProvider());
+		ArrayList<Ca> caProviders = new ArrayList<Ca>();
+		listSignerInfoResponse = new ArrayList<SignerInfoResponse>();
+		caProviders = DBConnector.getInstances().getCAProviders();
+		boolean isVerified = false;
+		try {
+			String data = RequestMetadata.getInstance(requestContext).get("SignedData");
+			String encoding = RequestMetadata.getInstance(requestContext).get("Encoding");
+			
+			if(encoding == null)
+				encoding = "UTF-8";
+			if(!encoding.equals("UTF-16LE")) {
+				encoding = "UTF-8";
+			}
+			
+			data = StringEscapeUtils.unescapeHtml(data);
+			String certificate = DBConnector.getInstances().authGetCertLCDPKI(channelName, user);
+			byte[] signedData = data.getBytes(encoding);
+			
+			isVerified = Verify(channelName, user, signedData, signature, certificate, caProviders);
+		} catch(Exception e) {
+			e.printStackTrace();
+			return new GenericSignResponse(sReq.getRequestID(), archiveId
+					, Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM+": "+e.getMessage());
+		}
+
+		byte[] byteResponse;
+		if(isVerified)
+			byteResponse = "OK".getBytes();
+		else
+			byteResponse = "FAILED".getBytes();
+
+		final Collection<? extends Archivable> archivables = Arrays.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE, CONTENT_TYPE, byteResponse, archiveId));
+
+    	if (signRequest instanceof GenericServletRequest) {
+       		signResponse = new GenericServletResponse(sReq.getRequestID(), byteResponse, getSigningCertificate(), archiveId, archivables, CONTENT_TYPE);
+        } else {
+        	signResponse = new GenericSignResponse(sReq.getRequestID(), byteResponse
+        			, getSigningCertificate(), null, archiveId
+        			, archivables, ResponseCode, ResponseMessage, listSignerInfoResponse);
+    	}
+
+        return signResponse;
+	}
+
+    public boolean Verify(String channelName, String user, byte[] data, byte[] signature, String certificate, ArrayList<Ca> caProviders) throws Exception {
+
+		X509Certificate x509 = ExtFunc.convertToX509Cert(certificate);
+		
+		String caCertificate = "";
+    	String caCertificate2 = "";
+    	String ocspURL = "";
+    	String crlUrl = "";
+    	int endpointConfigId = -1;
+    	String issuerName = getIssuerCN(x509);
+    	if(issuerName.compareTo("") != 0)
+    	{
+    		for(Ca ca : caProviders)
+    		{
+    			if(ca.getcACode().compareTo(issuerName) == 0)
+    			{
+    				ocspURL = ca.getoCSPUrl();
+    				caCertificate = ca.getCertificate();
+    				crlUrl = ca.getcRLPath();
+    				caCertificate2 = ca.getCertificate2();
+    				endpointConfigId = ca.getEndPointConfigID();
+    				break;
+    			}
+    		}
+    	}
+    	else {
+    		ResponseCode = Defines.CODE_INVALIDISSUERCERT;
+    		ResponseMessage = Defines.ERROR_INVALIDISSUERCERT;
+    		return false;
+    	}
+    	
+    	int methodValidateCert = DBConnector.getInstances().getMethodValidateCert(issuerName);
+		// signing time = current date
+    	java.util.Date signingTime = new java.util.Date();
+    	try {
+    		x509.checkValidity(signingTime);
+		}catch(CertificateExpiredException  ex) {
+			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+            ResponseMessage = Defines.ERROR_EXPIREDCERT;
+            return false;
+		}catch(CertificateNotYetValidException ex) {
+			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+            ResponseMessage = Defines.ERROR_NOTVALIDCERT;
+            return false;
+		}
+    	
+    	SignerInfoResponse signerInfoRes = new SignerInfoResponse(
+    			DatatypeConverter.printBase64Binary(x509.getEncoded())
+    			, x509.getSerialNumber().toString(16)
+				, getCNFromDN(x509.getIssuerDN().getName())
+				, getCNFromDN(x509.getSubjectDN().getName())
+				, x509.getNotBefore()
+				, x509.getNotAfter());
+    	
+    	Signature sig = Signature.getInstance("SHA1withRSA");
+		sig.initVerify(x509.getPublicKey());
+		sig.update(data);
+		boolean verificationResult = sig.verify(signature);
+		
+		signerInfoRes.setSigningTime(signingTime);
+		listSignerInfoResponse.add(signerInfoRes);
+    	switch(methodValidateCert)
+    	{
+    		case 0: //Only signature
+    			LOG.info("Only signature validation");
+    			if(verificationResult) {
+        			ResponseCode = Defines.CODE_SUCCESS;
+        			ResponseMessage = Defines.SUCCESS;
+        			//isRevoked = -1;
+    			}
+    			else {
+    				ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+    				ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+    			}
+    			//signerInfoRes.setIsCRLCheck(isCRLCheck);
+    			//signerInfoRes.setIsRevoked(isRevoked);
+    			//signerInfoRes.setRevokeTime(revokedDate);
+    			//listSignerInfoResponse.add(signerInfoRes);
+    			return verificationResult;
+    		case 1: //Signature and Cert via CRL
+    			LOG.info("Signature validation and Certificate validation by CRL");
+    			if(crlUrl.compareTo("")!=0 && caCertificate.compareTo("") !=0)
+    			{
+	        		X509Certificate subX509 = x509;
+    				
+	        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+	        		
+	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	        			if(caCertificate2 != null || caCertificate2.compareTo("") != 0) {
+	        				
+	    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+				        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+				        		return false;
+	    	        		}
+	        			} else {
+	        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+			        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+			        		return false;
+	        			}
+	        		}
+	        		//isCRLCheck = true;
+	        		CRLStatus CRLVarification = CertificateStatus.getInstance().checkCRLCertificate(subX509, crlUrl);
+    				if(!verificationResult) {
+    					ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+    					ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+    				} else {
+    					if(!CRLVarification.getIsRevoked()) {
+    						ResponseCode = Defines.CODE_SUCCESS;
+        					ResponseMessage = Defines.SUCCESS;
+        					//isRevoked = 1;
+        					//java.util.Date revokingTime = CRLVarification.getRevokeDate();
+        					//revokedDate = revokingTime;
+        					//signerInfoRes.setIsCRLCheck(isCRLCheck);
+        					//signerInfoRes.setIsRevoked(isRevoked);
+        					//signerInfoRes.setRevokeTime(revokedDate);
+        					//listSignerInfoResponse.add(signerInfoRes);
+    					} else {
+    						if(CRLVarification.getCertificateState().compareTo(CRLStatus.REVOKED) == 0) {
+    							java.util.Date revokingTime = CRLVarification.getRevokeDate();
+    							LOG.info("Certificate revoked. Revoked Date: "+revokingTime.toString());
+    							LOG.info("Signing Date: "+signingTime.toString());
+    							int checkDateAgain = CertificateStatus.compareDate(signingTime, revokingTime);
+    							
+    							if(checkDateAgain == 1 || checkDateAgain == 0) {
+    								ResponseCode = Defines.CODE_SUCCESS;
+		        					ResponseMessage = Defines.SUCCESS;
+		        					//isRevoked = 0;
+		        					//revokedDate = revokingTime;
+		        					//signerInfoRes.setIsCRLCheck(isCRLCheck);
+		        					//signerInfoRes.setIsRevoked(isRevoked);
+		        					//signerInfoRes.setRevokeTime(revokedDate);
+		        					//listSignerInfoResponse.add(signerInfoRes);
+		        					return (true && verificationResult);
+    							} else {
+    								ResponseCode = Defines.CODE_INFO_CERTIFICATE_REVOKED;
+    								ResponseMessage = Defines.INFO_CERTIFICATE_REVOKED;
+    							}
+    							
+    						} else {
+    							ResponseCode = Defines.CODE_INFO_CERTIFICATE_ERROR;
+	        					ResponseMessage = Defines.INFO_CERTIFICATE_ERROR;
+    						}
+    					}
+    				}
+    				return (!CRLVarification.getIsRevoked() && verificationResult);
+    			}
+    			else
+    			{
+    				ResponseCode = Defines.CODE_INVALIDCAINFO;
+	        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+    			}
+    			break;
+    		case 2: //Signature and Cert via OCSP
+    			LOG.info("Signature validation and Certificate validation by OCSP");
+	        	if(ocspURL.compareTo("") != 0 && caCertificate.compareTo("") !=0)
+	        	{
+	        		X509Certificate subX509 = x509;
+    				
+	        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+	        		
+	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	        			if(caCertificate2 == null || caCertificate2.compareTo("") != 0) {
+	        				
+	    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+				        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+				        		return false;
+	    	        		}
+	        			} else {
+	        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+			        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+			        		return false;
+	        			}
+	        		}
+	        		
+	        		
+	        		boolean ocspStatus = false;
+	        		int retryNumber = DBConnector.getInstances().getNumberOCSPReTry();
+	        		OcspStatus ocsp_status = CertificateStatus.getInstance().checkRevocationStatus(channelName, user, ocspURL, subX509, caX509, retryNumber, endpointConfigId);
+	        		ocspStatus = ocsp_status.getIsValid();
+	        		
+	        		if(!verificationResult) {
+	        			ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+	        			ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+	        		} else {
+	        			if(ocspStatus) {
+	        				ResponseCode = Defines.CODE_SUCCESS;
+		        			ResponseMessage = Defines.SUCCESS;
+	        			} else {
+	        				if(ocsp_status.getCertificateState().compareTo(OcspStatus.REVOKED) == 0) {
+	        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_REVOKED;
+			        			ResponseMessage = Defines.INFO_CERTIFICATE_REVOKED;
+	        				} else if(ocsp_status.getCertificateState().compareTo(OcspStatus.UNKNOWN) == 0) {
+	        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_UNKNOWN;
+			        			ResponseMessage = Defines.INFO_CERTIFICATE_UNKNOWN;
+	        				} else {
+	        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_ERROR;
+			        			ResponseMessage = Defines.INFO_CERTIFICATE_ERROR;
+	        				}
+	        			}
+	        		}
+	        		return (ocspStatus && verificationResult);
+	        	}
+	        	else
+	        	{
+    				ResponseCode = Defines.CODE_INVALIDCAINFO;
+	        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+	        	}
+    			break;
+    		default: // Signature and OCSP, if OCSP failure check CRL
+    			LOG.info("Signature validation and Certificate validation by OCSP (CRL if OCSP failure)");
+    			if(crlUrl.compareTo("") != 0 && ocspURL.compareTo("") != 0 && caCertificate.compareTo("") !=0)
+	        	{
+    				X509Certificate subX509 = x509;
+    				
+	        		X509Certificate caX509 = ExtFunc.convertToX509Cert(caCertificate);
+	        		
+	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	        			if(caCertificate2 == null || caCertificate2.compareTo("") != 0) {
+	        				
+	    	        		caX509 = ExtFunc.convertToX509Cert(caCertificate2);
+	    	        		if(!ExtFunc.checkCertificateRelation(caX509, subX509)) {
+	    	        			ResponseCode = Defines.CODE_INVALIDCERTIFICATE;
+				        		ResponseMessage = Defines.ERROR_INVALIDCERTIFICATE;
+				        		return false;
+	    	        		}
+	        			} else {
+	        				ResponseCode = Defines.CODE_INVALIDCAINFO;
+			        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+			        		return false;
+	        			}
+	        		}
+	        		
+	        		boolean ocspStatus = false;
+	        		boolean crlStatus = false;
+	        		int retryNumber = DBConnector.getInstances().getNumberOCSPReTry();
+	        		OcspStatus ocsp_status = CertificateStatus.getInstance().checkRevocationStatus(channelName, user, ocspURL, subX509, caX509, retryNumber, endpointConfigId);
+	        		if(ocsp_status.getCertificateState().equals(OcspStatus.ERROR))
+	        		{
+	        			//isCRLCheck = true;
+	        			CRLStatus CRLVarification = CertificateStatus.getInstance().checkCRLCertificate(subX509, crlUrl);
+	        			if(!verificationResult) {
+        					ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+        					ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+        				} else {
+        					if(!CRLVarification.getIsRevoked()) {
+        						ResponseCode = Defines.CODE_SUCCESS;
+	        					ResponseMessage = Defines.SUCCESS;
+	        					//isRevoked = 1;
+	        					//java.util.Date revokingTime = CRLVarification.getRevokeDate();
+	        					//revokedDate = revokingTime;
+	        					//signerInfoRes.setIsCRLCheck(isCRLCheck);
+	        					//signerInfoRes.setIsRevoked(isRevoked);
+	        					//signerInfoRes.setRevokeTime(revokedDate);
+	        					//listSignerInfoResponse.add(signerInfoRes);
+        					} else {
+        						if(CRLVarification.getCertificateState().compareTo(CRLStatus.REVOKED) == 0) {
+        							java.util.Date revokingTime = CRLVarification.getRevokeDate();
+        							int checkDateAgain = CertificateStatus.compareDate(signingTime, revokingTime);
+        							
+        							if(checkDateAgain == 1 || checkDateAgain == 0) {
+        								ResponseCode = Defines.CODE_SUCCESS;
+			        					ResponseMessage = Defines.SUCCESS;
+			        					//isRevoked = 0;
+			        					//revokedDate = revokingTime;
+			        					//signerInfoRes.setIsCRLCheck(isCRLCheck);
+			        					//signerInfoRes.setIsRevoked(isRevoked);
+			        					//signerInfoRes.setRevokeTime(revokedDate);
+			        					//listSignerInfoResponse.add(signerInfoRes);
+			        					return (true && verificationResult);
+        							} else {
+        								ResponseCode = Defines.CODE_INFO_CERTIFICATE_REVOKED;
+        								ResponseMessage = Defines.INFO_CERTIFICATE_REVOKED;
+        							}
+        							
+        						} else {
+        							ResponseCode = Defines.CODE_INFO_CERTIFICATE_ERROR;
+		        					ResponseMessage = Defines.INFO_CERTIFICATE_ERROR;
+        						}
+        					}
+        				}
+	        			return (!CRLVarification.getIsRevoked() && verificationResult);
+	        		}
+	        		else {
+	        			ocspStatus = ocsp_status.getIsValid();
+	        			if(!verificationResult) {
+		        			ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+		        			ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+		        		} else {
+		        			if(ocspStatus) {
+		        				ResponseCode = Defines.CODE_SUCCESS;
+			        			ResponseMessage = Defines.SUCCESS;
+		        			} else {
+		        				if(ocsp_status.getCertificateState().compareTo(OcspStatus.REVOKED) == 0) {
+		        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_REVOKED;
+				        			ResponseMessage = Defines.INFO_CERTIFICATE_REVOKED;
+		        				} else if(ocsp_status.getCertificateState().compareTo(OcspStatus.UNKNOWN) == 0) {
+		        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_UNKNOWN;
+				        			ResponseMessage = Defines.INFO_CERTIFICATE_UNKNOWN;
+		        				} else {
+		        					ResponseCode = Defines.CODE_INFO_CERTIFICATE_ERROR;
+				        			ResponseMessage = Defines.INFO_CERTIFICATE_ERROR;
+		        				}
+		        			}
+		        		}
+	        		}
+	        		
+	        		return (ocspStatus && verificationResult);
+	        	}
+    			else
+    			{
+    				ResponseCode = Defines.CODE_INVALIDCAINFO;
+	        		ResponseMessage = Defines.ERROR_INVALIDCAINFO;
+    			}
+    			break;
+    	}
+	    return verificationResult;
+    }
+    
+    private String getCNFromDN(String DN)
+    {
+    	String CN = "";
+    	String[] pairs = DN.split(",");
+    	for(String pair : pairs)
+    	{
+    		String[] paramvalue = pair.split("=");
+    		if(paramvalue[0].compareTo("CN")==0 || paramvalue[0].compareTo(" CN")==0)
+    		{
+    			CN = paramvalue[1];
+    			break;
+    		}
+    	}
+    	return CN;
+    }
+    
+    private String getIssuerCN(X509Certificate c) {
+    	String cn = "Error DN";
+    	try {
+	    	X509Principal principal = PrincipalUtil.getIssuerX509Principal(c);
+	        Vector<?> values = principal.getValues(X509Name.CN);
+	        cn = (String) values.get(0);
+    	} catch(Exception e) {
+    		e.printStackTrace();
+    	}
+    	return cn;
+    }
+    /*
+    private void statisticTimeOfValidating(String userContract)
+    {
+    	int statusCount = DBConnector.getInstances().IncreaseValidating(userContract);
+    	if(statusCount != 0)
+    	{
+    		switch(statusCount)
+    		{
+    		case 1:
+    			DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, userContract, "Value of count variable is less than zero", 214);
+    			break;
+    		case 2:
+    			DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, userContract, "User do validate operation doesn't have agreement in system", 214);
+    			break;
+    		default:
+    			DBConnector.getInstances().writeLogToDataBaseOutside(WORKERNAME, userContract, "Problem causes when call store IncreaseValidating", 214);
+    			break;
+    		}
+    	}
+    }
+    */
+    private boolean checkDataValidity(X509Certificate x509) {
+		try {
+			x509.checkValidity();
+			return true;
+		} catch(CertificateExpiredException e) {
+			e.printStackTrace();
+			
+		} catch (CertificateNotYetValidException e) {
+			e.printStackTrace();
+		}
+		return false;
+	}
+    
+    /**
+     * @see org.signserver.server.BaseProcessable#getStatus()
+     */
+    @Override
+    public WorkerStatus getStatus(final List<String> additionalFatalErrors) {
+        return validationService.getStatus();
+    }
+
+    @Override
+    protected List<String> getFatalErrors() {
+        final List<String> errors = new LinkedList<String>();
+        
+        errors.addAll(super.getFatalErrors());
+        errors.addAll(fatalErrors);
+
+        return errors;
+    }
+}

@@ -1,0 +1,2589 @@
+package org.signserver.clientws;
+
+import java.security.Signature;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateExpiredException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.CertificateNotYetValidException;
+import java.security.cert.X509Certificate;
+import java.sql.SQLException;
+import java.util.*;
+
+import javax.annotation.Resource;
+import javax.ejb.EJB;
+import javax.ejb.Stateless;
+import javax.jws.WebMethod;
+import javax.jws.WebParam;
+import javax.jws.WebService;
+import javax.naming.NamingException;
+import javax.servlet.http.HttpServletRequest;
+import javax.xml.bind.DatatypeConverter;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.ws.WebServiceContext;
+import javax.xml.ws.handler.MessageContext;
+import javax.jws.HandlerChain;
+
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.log4j.Logger;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.util.encoders.Base64;
+import org.signserver.common.*;
+import org.signserver.ejb.interfaces.IWorkerSession;
+import org.signserver.server.CertificateClientCredential;
+import org.signserver.server.IClientCredential;
+import org.signserver.server.UsernamePasswordClientCredential;
+import org.signserver.server.log.IWorkerLogger;
+import org.signserver.server.log.LogMap;
+
+import java.io.*;
+
+import org.signserver.clientws.*;
+import org.signserver.common.*;
+import org.signserver.common.util.*;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
+
+import com.tomicalab.cag360.license.*;
+
+import javax.xml.ws.handler.soap.SOAPMessageContext;
+
+import java.util.Map;
+
+import com.tomicalab.cag360.connector.ws.*;
+import vn.mobile_id.endpoint.service.datatype.*;
+import vn.mobile_id.endpoint.service.datatype.params.*;
+import vn.mobile_id.endpoint.client.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+public class ProcessSigner {
+
+	private static final Logger LOG = Logger.getLogger(ProcessSigner.class);
+	private final Random random = new Random();
+
+	private static final String HTTP_AUTH_BASIC_AUTHORIZATION = "Authorization";
+
+	private WebServiceContext wsContext;
+
+	private IWorkerSession.ILocal workersession;
+
+	public ProcessSigner(WebServiceContext wsContext,
+			IWorkerSession.ILocal workersession) {
+		this.wsContext = wsContext;
+		this.workersession = workersession;
+	}
+
+	public TransactionInfo processData(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String method = ExtFunc.getContent(Defines._METHOD, xmlData);
+
+		X509Certificate clientCertificate = getClientCertificate();
+		
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+		
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		// Check agreement status
+		int agreementStatus = DBConnector.getInstances()
+				.getAgreementStatusUser(user, channelName,
+						ExtFunc.getWorkerType(functionName, method));
+		if (agreementStatus == 1) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_AGREEMENTNOTEXITS,
+					Defines.ERROR_AGREEMENTNOTEXITS, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_AGREEMENTNOTEXITS,
+					Defines.CODE_AGREEMENTNOTEXITS, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		} else if (agreementStatus == 4 || agreementStatus == 2
+				|| agreementStatus == 3 || agreementStatus == 6
+				|| agreementStatus == 7) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_CONTRACTSTATUS, Defines.ERROR_CONTRACTSTATUS,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_CONTRACTSTATUS, Defines.CODE_CONTRACTSTATUS,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else if (agreementStatus == 5) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc
+					.genResponseMessage(Defines.CODE_AGREEMENTEXPIRED,
+							Defines.ERROR_AGREEMENTEXPIRED, channelName, user,
+							billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_AGREEMENTEXPIRED,
+					Defines.CODE_AGREEMENTEXPIRED, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+		
+		TransactionInfo resp = null;
+		if (functionName.contains(Defines.WORKER_PDFSIGNER)) {
+			resp = signPdf(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_XMLSIGNER)) {
+			resp = signXml(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_OFFICESIGNER)) {
+			resp = signOffice(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_CMSSIGNER)) {
+			resp = signCms(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_PKCS1SIGNER)) {
+			resp = signPkcs1(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_MULTISIGNER)) {
+			resp = signMultiType(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_DCSIGNER)) {
+			resp = signDc(transInfo);
+			return resp;
+		} else if (functionName.contains(Defines.WORKER_SIGNERAP)) {
+			resp = signAp(transInfo);
+			return resp;
+		} else {
+			// Invalid action
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDACTION, Defines.ERROR_INVALIDACTION,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDACTION, Defines.CODE_INVALIDACTION,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+	}
+
+	private TransactionInfo signPdf(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (byteData == null) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				byte[] signedFile = signResponse.getProcessedData();
+				String signingcert = null;
+				try {
+					signingcert = signResponse.getSignerCertificate() == null ? new String(
+							Base64.encode(signResponse
+									.getSignerCertificateChainBytes()))
+							: new String(Base64.encode(signResponse
+									.getSignerCertificate().getEncoded()));
+				} catch (CertificateEncodingException e) {
+					LOG.error("Something wrong: " + e.getMessage());
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INTERNALSYSTEM,
+							Defines.ERROR_INTERNALSYSTEM, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INTERNALSYSTEM,
+							Defines.CODE_INTERNALSYSTEM, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, fileType,
+						signingcert, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+				return new TransactionInfo(pData, signedFile);
+			} else {
+				LOG.error("Sign operation get error");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private TransactionInfo signXml(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (byteData == null) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		unsignedData = new String(byteData);
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				byte[] signedFile = signResponse.getProcessedData();
+				
+				signedData = new String(signedFile);
+				
+				String signingcert = null;
+				try {
+					signingcert = signResponse.getSignerCertificate() == null ? new String(
+							Base64.encode(signResponse
+									.getSignerCertificateChainBytes()))
+							: new String(Base64.encode(signResponse
+									.getSignerCertificate().getEncoded()));
+				} catch (CertificateEncodingException e) {
+					LOG.error("Something wrong: " + e.getMessage());
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INTERNALSYSTEM,
+							Defines.ERROR_INTERNALSYSTEM, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INTERNALSYSTEM,
+							Defines.CODE_INTERNALSYSTEM, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, fileType,
+						signingcert, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+				return new TransactionInfo(pData, signedFile);
+			} else {
+				LOG.error("Sign operation get error");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private TransactionInfo signOffice(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (byteData == null) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				byte[] signedFile = signResponse.getProcessedData();
+				String signingcert = null;
+				try {
+					signingcert = signResponse.getSignerCertificate() == null ? new String(
+							Base64.encode(signResponse
+									.getSignerCertificateChainBytes()))
+							: new String(Base64.encode(signResponse
+									.getSignerCertificate().getEncoded()));
+				} catch (CertificateEncodingException e) {
+					LOG.error("Something wrong: " + e.getMessage());
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INTERNALSYSTEM,
+							Defines.ERROR_INTERNALSYSTEM, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INTERNALSYSTEM,
+							Defines.CODE_INTERNALSYSTEM, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, fileType,
+						signingcert, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+				return new TransactionInfo(pData, signedFile);
+			} else {
+				LOG.error("Sign operation get error");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private TransactionInfo signCms(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		String dataToSign = ExtFunc.getContent(Defines._DATATOSIGN, xmlData);
+
+		if (dataToSign.equals("")) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDDATATOSIGN,
+					Defines.ERROR_INVALIDDATATOSIGN, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDDATATOSIGN,
+					Defines.CODE_INVALIDDATATOSIGN, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		try {
+			byteData = dataToSign.getBytes("UTF-16LE");
+		} catch (UnsupportedEncodingException e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		unsignedData = dataToSign;
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				byte[] signedFile = signResponse.getProcessedData();
+				signedData = new String(signedFile);
+				String signingcert = null;
+				try {
+					signingcert = signResponse.getSignerCertificate() == null ? new String(
+							Base64.encode(signResponse
+									.getSignerCertificateChainBytes()))
+							: new String(Base64.encode(signResponse
+									.getSignerCertificate().getEncoded()));
+				} catch (CertificateEncodingException e) {
+					LOG.error("Something wrong: " + e.getMessage());
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INTERNALSYSTEM,
+							Defines.ERROR_INTERNALSYSTEM, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INTERNALSYSTEM,
+							Defines.CODE_INTERNALSYSTEM, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, fileType,
+						signingcert, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+				return new TransactionInfo(pData, signedFile);
+			} else {
+				LOG.error("Sign operation get error");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private TransactionInfo signPkcs1(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		String method = ExtFunc.getContent(Defines._METHOD, xmlData);
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			e.printStackTrace();
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				if (method.compareTo(Defines.PKCS1CERREQUEST) == 0) {
+					byte[] signedFile = signResponse.getProcessedData();
+					String signingcert = null;
+					try {
+						signingcert = signResponse.getSignerCertificate() == null ? new String(
+								Base64.encode(signResponse
+										.getSignerCertificateChainBytes()))
+								: new String(Base64.encode(signResponse
+										.getSignerCertificate().getEncoded()));
+					} catch (CertificateEncodingException e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INTERNALSYSTEM,
+								Defines.ERROR_INTERNALSYSTEM, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INTERNALSYSTEM,
+								Defines.CODE_INTERNALSYSTEM, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, fileType,
+							signingcert, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, null);
+				} else {
+					byte[] signedFile = signResponse.getProcessedData();
+					String signingcert = null;
+					try {
+						signingcert = signResponse.getSignerCertificate() == null ? new String(
+								Base64.encode(signResponse
+										.getSignerCertificateChainBytes()))
+								: new String(Base64.encode(signResponse
+										.getSignerCertificate().getEncoded()));
+					} catch (CertificateEncodingException e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INTERNALSYSTEM,
+								Defines.ERROR_INTERNALSYSTEM, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INTERNALSYSTEM,
+								Defines.CODE_INTERNALSYSTEM, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, fileType,
+							signingcert, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, signedFile);
+				}
+			} else {
+				LOG.error("Sign operation get error");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private TransactionInfo signMultiType(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		String method = ExtFunc.getContent(Defines._METHOD, xmlData);
+		String transactionData = ExtFunc.getContent(Defines._TRANSACTIONDATA,
+				xmlData);
+		String _otp = ExtFunc.getContent(Defines._OTP, xmlData);
+
+		String isRemoteFile = ExtFunc
+				.getContent(Defines._ISREMOTEFILE, xmlData);
+
+		if (!isRemoteFile.equals(Defines.TRUE)) {
+			isRemoteFile = Defines.FALSE;
+		}
+
+		String fileId = ExtFunc.getContent(Defines._FILEID, xmlData);
+		String fileDisplayValue = null;
+		String fileMineType = null;
+		String fileName = null;
+
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (fileType.equals("")) {
+			LOG.error("File Type cannot be null or empty");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INVALIDFILETYPE,
+					Defines.ERROR_INVALIDFILETYPE, channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INVALIDFILETYPE,
+					Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn, sslSnb,
+					idTag, channelName, xmlData, pData, billCode, unsignedData,
+					signedData);
+			return new TransactionInfo(pData);
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+		requestMetadata.add(fileExtension);
+
+		org.signserver.clientws.Metadata channelNameOTP = new org.signserver.clientws.Metadata(
+				Defines._CHANNEL, channelName);
+
+		org.signserver.clientws.Metadata userOTP = new org.signserver.clientws.Metadata(
+				"User", user);
+
+		requestMetadata.add(channelNameOTP);
+		requestMetadata.add(userOTP);
+
+		if (method.compareTo("") != 0) {
+			if (method.compareTo(Defines.WORKER_OATHVALIDATOR) != 0) {
+				// store check OTP co bi lock hay ko
+				int otpCheck = DBConnector.getInstances().checkHWOTP(
+						channelName, user);
+				if (otpCheck == 1 || otpCheck == 2) {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_OTPLOCKED, Defines.ERROR_OTPLOCKED,
+							channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_OTPLOCKED, Defines.CODE_OTPLOCKED,
+							sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+							xmlData, pData, billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				} else if (otpCheck == -1) {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_UNKNOWN, Defines.ERROR_UNKNOWN,
+							channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_UNKNOWN, Defines.CODE_UNKNOWN,
+							sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+							xmlData, pData, billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+				// method request
+				if (method.compareTo(Defines.WORKER_OATHREQUEST) == 0) {
+					if (transactionData.equals("")) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INVALIDPARAMETER,
+								Defines.ERROR_INVALIDPARAMETER, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INVALIDPARAMETER,
+								Defines.CODE_INVALIDPARAMETER, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					// kiem tra xem hop dong co dang
+					// ky otp sms hay khong
+					if (!DBConnector.getInstances().authCheckOTPMethod(
+							channelName, user, Defines._OTPSMS)) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INVALIDOTPMETHOD,
+								Defines.ERROR_INVALIDOTPMETHOD, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INVALIDOTPMETHOD,
+								Defines.CODE_INVALIDOTPMETHOD, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					// Kiem tra so lan toi da quy
+					// dinh doi voi OTP
+					/*
+					if (!DBConnector.getInstances().authCheckOTPPerformance(
+							channelName, user, method)) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_OTPPERFORMANCEXCEED,
+								Defines.ERROR_OTPPERFORMANCEXCEED, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_OTPPERFORMANCEXCEED,
+								Defines.CODE_OTPPERFORMANCEXCEED, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					*/
+				}
+				// method response
+				if (method.compareTo(Defines.WORKER_OATHRESPONSE) == 0) {
+					if (_otp.equals("")) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INVALIDPARAMETER,
+								Defines.ERROR_INVALIDPARAMETER, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INVALIDPARAMETER,
+								Defines.CODE_INVALIDPARAMETER, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+				}
+			} else {
+				// method OATHValidator
+				// kiem tra xem hop dong co dang ky
+				// otp token hay khong
+				if (!DBConnector.getInstances().authCheckOTPMethod(channelName,
+						user, Defines._OTPHARDWARE)) {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INVALIDOTPMETHOD,
+							Defines.ERROR_INVALIDOTPMETHOD, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INVALIDOTPMETHOD,
+							Defines.CODE_INVALIDOTPMETHOD, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				if (_otp.equals("")) {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INVALIDPARAMETER,
+							Defines.ERROR_INVALIDPARAMETER, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INVALIDPARAMETER,
+							Defines.CODE_INVALIDPARAMETER, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+			}
+		}
+
+		if (method.compareTo(Defines.WORKER_OATHRESPONSE) != 0) {
+			if (isRemoteFile.equals(Defines.TRUE)) {
+				// Get file from external server
+				if (fileId.equals("")) {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INVALIDPARAMETER,
+							Defines.ERROR_INVALIDPARAMETER, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INVALIDPARAMETER,
+							Defines.CODE_INVALIDPARAMETER, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				} else {
+					com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+							.getInstance().getWS();
+
+					com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+
+					wsRequest.setFunctionName(Constant.F_FILEREMOTE);
+
+					com.tomicalab.cag360.connector.ws.MetaData wsFileAction = new com.tomicalab.cag360.connector.ws.MetaData();
+					wsFileAction.setKey(Constant.K_FILEACTION);
+					wsFileAction.setValue("GET");
+
+					com.tomicalab.cag360.connector.ws.MetaData wsFileId = new com.tomicalab.cag360.connector.ws.MetaData();
+					wsFileId.setKey(Constant.K_FILEID);
+					wsFileId.setValue(fileId);
+
+					wsRequest.getSData().add(wsFileId);
+					wsRequest.getSData().add(wsFileAction);
+
+					ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+					int responseCode = wsResponse.getResponseCode();
+					if (responseCode != 0) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_EXTERNAL_FILE_GET,
+								Defines.ERROR_EXTERNAL_FILE_GET, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_EXTERNAL_FILE_GET,
+								Defines.CODE_EXTERNAL_FILE_GET, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					} else {
+						byteData = wsResponse.getBData();
+						fileType = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_FILETYPE);
+						fileDisplayValue = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_FILEDISPLAYVALUE);
+						fileMineType = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_FILEMINETYPE);
+						fileName = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_FILENAME);
+						// add into metadata
+						LOG.info("FileType: " + fileType);
+						fileExtension = new org.signserver.clientws.Metadata(
+								"fileType", fileType);
+						requestMetadata.add(fileExtension);
+					}
+				}
+			}
+
+			if (byteData == null) {
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+			}
+		}
+
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (method.compareTo(Defines.WORKER_OATHREQUEST) == 0) {
+				if (responseCode == Defines.CODE_SUCCESS) {
+					String otp = new String(signResponse.getProcessedData());
+					// mess response
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseOATHMessage(
+							Defines.CODE_OTP_STATUS_WAIT,
+							Defines.OTP_STATUS_WAIT, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.OTP_STATUS_WAIT,
+							Defines.CODE_OTP_STATUS_WAIT, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+
+					// send sms
+					String phoneNo = DBConnector.getInstances()
+							.authGetPhoneNoOTP(channelName, user);
+					String otpInformation = DBConnector.getInstances()
+							.OTPInformationGeneration(
+									ExtFunc.removeAccent(transactionData), otp);
+					
+					/*
+					// SMS Gateway
+					com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+							.getInstance().getWS();
+
+					com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+					wsRequest.setFunctionName(Constant.F_SMS);
+
+					com.tomicalab.cag360.connector.ws.MetaData wsPhone = new com.tomicalab.cag360.connector.ws.MetaData();
+					wsPhone.setKey(Constant.K_MOBILENO);
+					wsPhone.setValue(phoneNo);
+
+					com.tomicalab.cag360.connector.ws.MetaData wsContent = new com.tomicalab.cag360.connector.ws.MetaData();
+					wsContent.setKey(Constant.K_CONTENT);
+					wsContent.setValue(otpInformation);
+
+					wsRequest.getSData().add(wsPhone);
+					wsRequest.getSData().add(wsContent);
+
+					ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+					DBConnector.getInstances().authInsertSMS(
+							channelName,
+							com.tomicalab.cag360.connector.ws.Utils
+									.getMetaDataValue(wsResponse.getSData(),
+											Constant.K_SERVICEID), phoneNo,
+							otpInformation,
+							(wsResponse.getResponseCode() == 0),
+							wsResponse.getResponseMessage(), 1, user);
+					*/
+					
+					// get endpoint info
+					EndPointConfig epc = DBConnector.getInstances().getEndPointConfig();
+					String epcProperties = epc.getProperties();
+					String smsVendor = ExtFunc.getEpcProperty(epcProperties, "smsVendor");
+					
+					
+					Request request = new Request();
+					request.setAction("sendSms");
+					
+					SMSParams smsParams = new SMSParams();
+					smsParams.setSmsVendor(smsVendor);
+					smsParams.setSmsPhoneNo(phoneNo);
+					smsParams.setSmsContent(otpInformation);
+					
+					request.setSmsParams(smsParams);
+					
+					
+					ObjectMapper op = new ObjectMapper();
+					Response response = null;
+					
+					try {
+						String payload = op.writeValueAsString(request);
+						Endpoint ep = new Endpoint(epc.getUrl());
+						ep.setKeyID(epc.getKeyId());
+						ep.setAppID(epc.getAppId());
+						ep.setClientIP(epc.getHost());
+						
+						String respPayload = ep.call(payload);
+						response = op.readValue(respPayload, Response.class);
+						
+					} catch(Exception e) {
+						e.printStackTrace();
+						LOG.error("Error while calling endpoint service.");
+						billCode = ExtFunc.getBillCode();
+						pData = ExtFunc.genResponseMessage(Defines.CODE_ENDPOINTEXP,
+								Defines.ERROR_ENDPOINTEXP, channelName, user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user, Defines.ERROR_ENDPOINTEXP,
+								Defines.CODE_ENDPOINTEXP, sslSubDn, sslIseDn, sslSnb, idTag,
+								channelName, xmlData, pData, billCode, unsignedData,
+								signedData);
+
+						return new TransactionInfo(pData);
+					}
+					
+					
+					if(response.getStatus().getResponseCode() == 0) {
+						LOG.info("Sms has been sent to "+phoneNo);
+					} else {
+						LOG.error("Failed to send sms. Details: "+response.getStatus().getMessageDetails());
+					}
+
+					return new TransactionInfo(pData);
+				} else {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+
+					return new TransactionInfo(pData);
+				}
+
+			} else if (method.compareTo(Defines.WORKER_OATHRESPONSE) == 0) {
+				if (responseCode != Defines.CODE_SUCCESS) {
+					int otpCheck = DBConnector.getInstances().leftRetryHWOTP(
+							channelName, user);
+					if (otpCheck == -100) {
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseOATHMessage(
+								Defines.CODE_OTPLOCKED,
+								Defines.ERROR_OTPLOCKED, channelName, user,
+								billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_OTPLOCKED,
+								Defines.CODE_OTPLOCKED, sslSubDn, sslIseDn,
+								sslSnb, idTag, channelName, xmlData, pData,
+								billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseOATHMessage(responseCode,
+							responseMessage, channelName, user, billCode,
+							otpCheck);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				} else {
+					// verify otp success and
+					// response sigend file
+					DBConnector.getInstances().increaseSuccessTransaction();
+					
+					DBConnector.getInstances().resetErrorCounterHWOTP(
+							channelName, user);
+					byte[] signedFile = signResponse.getProcessedData();
+					String signingcert = null;
+					try {
+						signingcert = signResponse.getSignerCertificate() == null ? new String(
+								Base64.encode(signResponse
+										.getSignerCertificateChainBytes()))
+								: new String(Base64.encode(signResponse
+										.getSignerCertificate().getEncoded()));
+					} catch (CertificateEncodingException e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INTERNALSYSTEM,
+								Defines.ERROR_INTERNALSYSTEM, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INTERNALSYSTEM,
+								Defines.CODE_INTERNALSYSTEM, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, fileType,
+							signingcert, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, signedFile);
+				}
+			} else if (method.compareTo(Defines.WORKER_OATHVALIDATOR) == 0) {
+				// OATHValidator
+				if (responseCode != Defines.CODE_SUCCESS) {
+					// Su dung lai store checkOTP de
+					// tra ve
+					// so lan con lai
+					if (responseCode == Defines.CODE_OTPLOCKED) {
+						// locked
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_OTPLOCKED,
+								Defines.ERROR_OTPLOCKED, channelName, user,
+								billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_OTPLOCKED,
+								Defines.CODE_OTPLOCKED, sslSubDn, sslIseDn,
+								sslSnb, idTag, channelName, xmlData, pData,
+								billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					} else if (responseCode == Defines.CODE_OTP_STATUS_FAIL) {
+						// invalid
+						String retry = new String(
+								signResponse.getProcessedData());
+
+						int otpRetry = Integer.parseInt(retry);
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(responseCode,
+								responseMessage, channelName, user, otpRetry,
+								billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								responseMessage, responseCode, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					} else if (responseCode == Defines.CODE_OTPNEEDSYNC) {
+						// synch
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(responseCode,
+								responseMessage, channelName, user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								responseMessage, responseCode, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+
+						return new TransactionInfo(pData);
+					} else if (responseCode == Defines.CODE_OTP_STATUS_DISABLE) {
+						// disable
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(responseCode,
+								responseMessage, channelName, user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								responseMessage, responseCode, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+
+						return new TransactionInfo(pData);
+					} else {
+						// lost
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(responseCode,
+								responseMessage, channelName, user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								responseMessage, responseCode, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+
+						return new TransactionInfo(pData);
+					}
+				} else {
+					
+					DBConnector.getInstances().increaseSuccessTransaction();
+					
+					DBConnector.getInstances().resetErrorCounterHWOTP(
+							channelName, user);
+
+					byte[] signedFile = signResponse.getProcessedData();
+					String signingcert = null;
+					try {
+						signingcert = signResponse.getSignerCertificate() == null ? new String(
+								Base64.encode(signResponse
+										.getSignerCertificateChainBytes()))
+								: new String(Base64.encode(signResponse
+										.getSignerCertificate().getEncoded()));
+					} catch (CertificateEncodingException e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INTERNALSYSTEM,
+								Defines.ERROR_INTERNALSYSTEM, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INTERNALSYSTEM,
+								Defines.CODE_INTERNALSYSTEM, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, fileType,
+							signingcert, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, signedFile);
+				}
+			} else {
+				// No Auth
+				if (responseCode == Defines.CODE_SUCCESS) {
+					
+					DBConnector.getInstances().increaseSuccessTransaction();
+					
+					byte[] signedFile = signResponse.getProcessedData();
+					String signingcert = null;
+					try {
+						signingcert = signResponse.getSignerCertificate() == null ? new String(
+								Base64.encode(signResponse
+										.getSignerCertificateChainBytes()))
+								: new String(Base64.encode(signResponse
+										.getSignerCertificate().getEncoded()));
+					} catch (CertificateEncodingException e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(
+								Defines.CODE_INTERNALSYSTEM,
+								Defines.ERROR_INTERNALSYSTEM, channelName,
+								user, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								Defines.ERROR_INTERNALSYSTEM,
+								Defines.CODE_INTERNALSYSTEM, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData);
+					}
+					if (!isRemoteFile.equals(Defines.TRUE)) {
+
+						String billCode = ExtFunc.getBillCode();
+						String pData = ExtFunc.genResponseMessage(responseCode,
+								responseMessage, channelName, user, fileType,
+								signingcert, billCode);
+						DBConnector.getInstances().writeLogToDataBaseOutside(
+								functionName, username,
+								ExtFunc.getRequestIP(wsContext), user,
+								responseMessage, responseCode, sslSubDn,
+								sslIseDn, sslSnb, idTag, channelName, xmlData,
+								pData, billCode, unsignedData, signedData);
+						return new TransactionInfo(pData, signedFile);
+					} else {
+						// isRemoteFile = true
+						com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+								.getInstance().getWS();
+
+						com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+
+						wsRequest.setFunctionName(Constant.F_FILEREMOTE);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsFileAction = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsFileAction.setKey(Constant.K_FILEACTION);
+						wsFileAction.setValue("SET");
+
+						com.tomicalab.cag360.connector.ws.MetaData wsFileId = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsFileId.setKey(Constant.K_FILEID);
+						wsFileId.setValue(fileId);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsFileName = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsFileName.setKey(Constant.K_FILENAME);
+						wsFileName.setValue(fileName);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsFileMineType = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsFileMineType.setKey(Constant.K_FILEMINETYPE);
+						wsFileMineType.setValue(fileMineType);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsFileDisplayValue = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsFileDisplayValue.setKey(Constant.K_FILEDISPLAYVALUE);
+						wsFileDisplayValue.setValue(fileDisplayValue);
+
+						wsRequest.getSData().add(wsFileId);
+						wsRequest.getSData().add(wsFileName);
+						wsRequest.getSData().add(wsFileMineType);
+						wsRequest.getSData().add(wsFileDisplayValue);
+						wsRequest.getSData().add(wsFileAction);
+						wsRequest.setBData(signedFile);
+
+						ConnectorData wsResponse = wsConnector.call(wsRequest);
+						int connectorResponseCode = wsResponse
+								.getResponseCode();
+						if (connectorResponseCode != 0) {
+							String billCode = ExtFunc.getBillCode();
+							String pData = ExtFunc.genResponseMessage(
+									Defines.CODE_EXTERNAL_FILE_SET,
+									Defines.ERROR_EXTERNAL_FILE_SET,
+									channelName, user, billCode);
+							DBConnector.getInstances()
+									.writeLogToDataBaseOutside(functionName,
+											username,
+											ExtFunc.getRequestIP(wsContext),
+											user,
+											Defines.ERROR_EXTERNAL_FILE_SET,
+											Defines.CODE_EXTERNAL_FILE_SET,
+											sslSubDn, sslIseDn, sslSnb, idTag,
+											channelName, xmlData, pData,
+											billCode, unsignedData, signedData);
+							return new TransactionInfo(pData);
+						} else {
+							fileId = com.tomicalab.cag360.connector.ws.Utils
+									.getMetaDataValue(wsResponse.getSData(),
+											Constant.K_FILEID);
+							LOG.info("New FileID " + fileId);
+							String billCode = ExtFunc.getBillCode();
+							String pData = ExtFunc.genResponseMessage(
+									responseCode, responseMessage, channelName,
+									user, null, fileId, signingcert, billCode);
+							DBConnector.getInstances()
+									.writeLogToDataBaseOutside(functionName,
+											username,
+											ExtFunc.getRequestIP(wsContext),
+											user, responseMessage,
+											responseCode, sslSubDn, sslIseDn,
+											sslSnb, idTag, channelName,
+											xmlData, pData, billCode,
+											unsignedData, signedData);
+							return new TransactionInfo(pData);
+						}
+					}
+				} else {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+
+					return new TransactionInfo(pData);
+				}
+			}
+		}
+	}
+
+	private TransactionInfo signDc(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		String method = ExtFunc.getContent(Defines._METHOD, xmlData);
+		if (method.compareTo(Defines.DCRESPONE) != 0) {
+			if (fileType.equals("")) {
+				LOG.error("File Type cannot be null or empty");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_INVALIDFILETYPE,
+						Defines.ERROR_INVALIDFILETYPE, channelName, user,
+						billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_INVALIDFILETYPE,
+						Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn,
+						sslSnb, idTag, channelName, xmlData, pData, billCode,
+						unsignedData, signedData);
+				return new TransactionInfo(pData);
+			}
+		}
+
+		if (byteData == null) {
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+
+		org.signserver.clientws.Metadata channelMeta = new org.signserver.clientws.Metadata(
+				Defines._CHANNEL, channelName);
+
+		org.signserver.clientws.Metadata userMeta = new org.signserver.clientws.Metadata(
+				Defines._USER, user);
+		
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+
+		requestMetadata.add(channelMeta);
+		requestMetadata.add(userMeta);
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (method.compareTo(Defines.DCREQUEST) == 0) {
+				if (responseCode == Defines.CODE_SUCCESS) {
+					byte[] needToSign = signResponse.getProcessedData();
+					String billCode = ExtFunc.getBillCode();
+
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, null, null,
+							billCode);
+
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, needToSign);
+				} else {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+
+					return new TransactionInfo(pData);
+				}
+
+			} else {
+				// DCResponse
+				if (responseCode == Defines.CODE_SUCCESS) {
+					
+					DBConnector.getInstances().increaseSuccessTransaction();
+					
+					byte[] signedFile = signResponse.getProcessedData();
+					String billCode = ExtFunc.getBillCode();
+
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, null, null,
+							billCode);
+
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData, signedFile);
+				} else {
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(responseCode,
+							responseMessage, channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							responseMessage, responseCode, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+
+					return new TransactionInfo(pData);
+				}
+			}
+		}
+	}
+
+	private TransactionInfo signAp(TransactionInfo transInfo) {
+		String functionName = "";
+		String sslSubDn = "";
+		String sslIseDn = "";
+		String sslSnb = "";
+		String unsignedData = "";
+		String signedData = "";
+
+		String xmlData = transInfo.getXmlData();
+		CAGCredential cagCredential = transInfo.getCredentialData();
+		byte[] byteData = transInfo.getFileData();
+
+		String username = cagCredential.getUsername();
+		String channelName = ExtFunc.getContent(Defines._CHANNEL, xmlData);
+		String user = ExtFunc.getContent(Defines._USER, xmlData);
+		String idTag = ExtFunc.getContent(Defines._ID, xmlData);
+		String metaData = ExtFunc.getContent(Defines._METADATA, xmlData);
+		String method = ExtFunc.getContent(Defines._METHOD, xmlData);
+
+		X509Certificate clientCertificate = getClientCertificate();
+		if (DBConnector.getInstances().isUseSSL()) {
+			if (clientCertificate != null) {
+				sslSubDn = clientCertificate.getSubjectDN().getName();
+				sslIseDn = clientCertificate.getIssuerDN().getName();
+				sslSnb = clientCertificate.getSerialNumber().toString(16);
+			} else {
+				sslSubDn = "";
+				sslIseDn = "";
+				sslSnb = "";
+			}
+		}
+
+		functionName = ExtFunc.getContent(Defines._WORKERNAME, xmlData);
+		String fileType = ExtFunc.getContent(Defines._FILETYPE, xmlData);
+
+		if (method.compareTo(Defines.SIGNERAP_STAREG) != 0
+				&& method.compareTo(Defines.SIGNERAP_STRREG) != 0) {
+			if (fileType.equals("")) {
+				LOG.error("File Type cannot be null or empty");
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_INVALIDFILETYPE,
+						Defines.ERROR_INVALIDFILETYPE, channelName, user,
+						billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_INVALIDFILETYPE,
+						Defines.CODE_INVALIDFILETYPE, sslSubDn, sslIseDn,
+						sslSnb, idTag, channelName, xmlData, pData, billCode,
+						unsignedData, signedData);
+				return new TransactionInfo(pData);
+			}
+		}
+
+		if (method.equals(Defines.SIGNERAP_STAREG)
+				|| method.equals(Defines.SIGNERAP_STRREG)) {
+			// do nothing
+		} else {
+			if (byteData == null) {
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOBASE64FILE, Defines.ERROR_NOBASE64FILE,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOBASE64FILE, Defines.CODE_NOBASE64FILE,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+			}
+		}
+
+		List<org.signserver.clientws.Metadata> requestMetadata = new ArrayList<Metadata>();
+		if (!metaData.equals("")) {
+			requestMetadata = getMetaData(metaData);
+		}
+
+		String pkiSim = DBConnector.getInstances().authGetPhoneNoSimPKI(
+				channelName, user);
+		
+		org.signserver.clientws.Metadata channel_pkisim = new org.signserver.clientws.Metadata(
+				Defines._CHANNEL, channelName);
+
+		org.signserver.clientws.Metadata user_pkisim = new org.signserver.clientws.Metadata(
+				Defines._USER, user);
+
+		org.signserver.clientws.Metadata phoneNo_pkisim = new org.signserver.clientws.Metadata(
+				Defines._PKISIM, pkiSim);
+
+		org.signserver.clientws.Metadata fileExtension = new org.signserver.clientws.Metadata(
+				"fileType", fileType);
+		
+		requestMetadata.add(channel_pkisim);
+		requestMetadata.add(user_pkisim);
+		requestMetadata.add(phoneNo_pkisim);
+		requestMetadata.add(fileExtension);
+
+		final int requestId = random.nextInt();
+		final int workerId = getWorkerId(functionName);
+
+		final RequestContext requestContext = handleRequestContext(
+				requestMetadata, workerId);
+
+		final ProcessRequest req = new GenericSignRequest(requestId, byteData);
+		ProcessResponse resp = null;
+		try {
+			resp = getWorkerSession().process(workerId, req, requestContext);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+			e.printStackTrace();
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM,
+					channelName, user, billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_INTERNALSYSTEM, Defines.CODE_INTERNALSYSTEM,
+					sslSubDn, sslIseDn, sslSnb, idTag, channelName, xmlData,
+					pData, billCode, unsignedData, signedData);
+			return new TransactionInfo(pData);
+		}
+
+		if (!(resp instanceof GenericSignResponse)) {
+			LOG.error("resp is not a instance of GenericSignResponse");
+			String billCode = ExtFunc.getBillCode();
+			String pData = ExtFunc.genResponseMessage(
+					Defines.CODE_UNEXPECTEDRETURNTYPE,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE, channelName, user,
+					billCode);
+			DBConnector.getInstances().writeLogToDataBaseOutside(functionName,
+					username, ExtFunc.getRequestIP(wsContext), user,
+					Defines.ERROR_UNEXPECTEDRETURNTYPE,
+					Defines.CODE_UNEXPECTEDRETURNTYPE, sslSubDn, sslIseDn,
+					sslSnb, idTag, channelName, xmlData, pData, billCode,
+					unsignedData, signedData);
+			return new TransactionInfo(pData);
+		} else {
+			final GenericSignResponse signResponse = (GenericSignResponse) resp;
+			if (signResponse.getRequestID() != requestId) {
+				LOG.error("Response ID " + signResponse.getRequestID()
+						+ " not matching request ID " + requestId);
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(
+						Defines.CODE_NOTMATCHID, Defines.ERROR_NOTMATCHID,
+						channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user,
+						Defines.ERROR_NOTMATCHID, Defines.CODE_NOTMATCHID,
+						sslSubDn, sslIseDn, sslSnb, idTag, channelName,
+						xmlData, pData, billCode, unsignedData, signedData);
+				return new TransactionInfo(pData);
+
+			}
+
+			int responseCode = signResponse.getResponseCode();
+			String responseMessage = signResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+				LOG.info("Sign operation completed");
+				DBConnector.getInstances().increaseSuccessTransaction();
+				
+				byte[] signedFile = signResponse.getProcessedData();
+				String signingcert = null;
+				try {
+					signingcert = signResponse.getSignerCertificate() == null ? new String(
+							Base64.encode(signResponse
+									.getSignerCertificateChainBytes()))
+							: new String(Base64.encode(signResponse
+									.getSignerCertificate().getEncoded()));
+					
+				} catch (Exception e) {
+					LOG.error("Something wrong: " + e.getMessage());
+					String billCode = ExtFunc.getBillCode();
+					String pData = ExtFunc.genResponseMessage(
+							Defines.CODE_INTERNALSYSTEM,
+							Defines.ERROR_INTERNALSYSTEM, channelName, user,
+							billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user,
+							Defines.ERROR_INTERNALSYSTEM,
+							Defines.CODE_INTERNALSYSTEM, sslSubDn, sslIseDn,
+							sslSnb, idTag, channelName, xmlData, pData,
+							billCode, unsignedData, signedData);
+					return new TransactionInfo(pData);
+				}
+
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, fileType,
+						signingcert, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+				return new TransactionInfo(pData, signedFile);
+			} else {
+				String billCode = ExtFunc.getBillCode();
+				String pData = ExtFunc.genResponseMessage(responseCode,
+						responseMessage, channelName, user, billCode);
+				DBConnector.getInstances().writeLogToDataBaseOutside(
+						functionName, username,
+						ExtFunc.getRequestIP(wsContext), user, responseMessage,
+						responseCode, sslSubDn, sslIseDn, sslSnb, idTag,
+						channelName, xmlData, pData, billCode, unsignedData,
+						signedData);
+
+				return new TransactionInfo(pData);
+			}
+		}
+	}
+
+	private int getWorkerId(String workerIdOrName) {
+		final int retval;
+
+		if (workerIdOrName.substring(0, 1).matches("\\d")) {
+			retval = Integer.parseInt(workerIdOrName);
+		} else {
+			retval = getWorkerSession().getWorkerId(workerIdOrName);
+		}
+		return retval;
+	}
+
+	private IWorkerSession.ILocal getWorkerSession() {
+		if (workersession == null) {
+			try {
+				workersession = ServiceLocator.getInstance().lookupLocal(
+						IWorkerSession.ILocal.class);
+			} catch (NamingException e) {
+				LOG.error(e);
+			}
+		}
+		return workersession;
+	}
+
+	private RequestContext handleRequestContext(
+			final List<Metadata> requestMetadata, final int workerId) {
+		final HttpServletRequest servletRequest = (HttpServletRequest) wsContext
+				.getMessageContext().get(MessageContext.SERVLET_REQUEST);
+		String requestIP = ExtFunc.getRequestIP(wsContext);
+		X509Certificate clientCertificate = getClientCertificate();
+		final RequestContext requestContext = new RequestContext(
+				clientCertificate, requestIP);
+
+		IClientCredential credential;
+
+		if (clientCertificate instanceof X509Certificate) {
+			final X509Certificate cert = (X509Certificate) clientCertificate;
+			LOG.debug("Authentication: certificate");
+			credential = new CertificateClientCredential(cert.getSerialNumber()
+					.toString(16), cert.getIssuerDN().getName());
+		} else {
+			// Check is client supplied basic-credentials
+			final String authorization = servletRequest
+					.getHeader(HTTP_AUTH_BASIC_AUTHORIZATION);
+			if (authorization != null) {
+				LOG.debug("Authentication: password");
+
+				final String decoded[] = new String(Base64.decode(authorization
+						.split("\\s")[1])).split(":", 2);
+
+				credential = new UsernamePasswordClientCredential(decoded[0],
+						decoded[1]);
+			} else {
+				LOG.debug("Authentication: none");
+				credential = null;
+			}
+		}
+		requestContext.put(RequestContext.CLIENT_CREDENTIAL, credential);
+
+		final LogMap logMap = LogMap.getInstance(requestContext);
+
+		// Add HTTP specific log entries
+		logMap.put(
+				IWorkerLogger.LOG_REQUEST_FULLURL,
+				servletRequest.getRequestURL().append("?")
+						.append(servletRequest.getQueryString()).toString());
+		logMap.put(IWorkerLogger.LOG_REQUEST_LENGTH,
+				servletRequest.getHeader("Content-Length"));
+		logMap.put(IWorkerLogger.LOG_XFORWARDEDFOR,
+				servletRequest.getHeader("X-Forwarded-For"));
+
+		logMap.put(IWorkerLogger.LOG_WORKER_NAME,
+				getWorkerSession().getCurrentWorkerConfig(workerId)
+						.getProperty(ProcessableConfig.NAME));
+
+		if (requestMetadata == null) {
+			requestContext.remove(RequestContext.REQUEST_METADATA);
+		} else {
+			final RequestMetadata metadata = RequestMetadata
+					.getInstance(requestContext);
+			for (Metadata rmd : requestMetadata) {
+				metadata.put(rmd.getName(), rmd.getValue());
+			}
+
+			// Special handling of FILENAME
+			String fileName = metadata.get(RequestContext.FILENAME);
+			if (fileName != null) {
+				requestContext.put(RequestContext.FILENAME, fileName);
+				logMap.put(IWorkerLogger.LOG_FILENAME, fileName);
+			}
+		}
+
+		return requestContext;
+	}
+
+	private X509Certificate getClientCertificate() {
+		MessageContext msgContext = wsContext.getMessageContext();
+		HttpServletRequest request = (HttpServletRequest) msgContext
+				.get(MessageContext.SERVLET_REQUEST);
+		X509Certificate[] certificates = (X509Certificate[]) request
+				.getAttribute("javax.servlet.request.X509Certificate");
+
+		if (certificates != null) {
+			return certificates[0];
+		}
+		return null;
+	}
+
+	private List<Metadata> getMetaData(String metaData) {
+		List<org.signserver.clientws.Metadata> listMD = new ArrayList<org.signserver.clientws.Metadata>();
+		try {
+			String xmlData = "<MetaData>" + metaData + "</MetaData>";
+
+			DocumentBuilderFactory factory = DocumentBuilderFactory
+					.newInstance();
+			DocumentBuilder builder = factory.newDocumentBuilder();
+			Document document = builder.parse(new InputSource(new StringReader(
+					xmlData)));
+			Element rootElement = document.getDocumentElement();
+
+			NodeList list = document.getElementsByTagName("*");
+			for (int i = 0; i < list.getLength(); i++) {
+				Element element = (Element) list.item(i);
+				if (!element.getNodeName().equals("MetaData")) {
+					org.signserver.clientws.Metadata tmp = new org.signserver.clientws.Metadata(
+							element.getNodeName(), element.getTextContent());
+					listMD.add(tmp);
+
+				}
+			}
+
+		} catch (Exception e) {
+			listMD = null;
+		}
+		return listMD;
+	}
+}

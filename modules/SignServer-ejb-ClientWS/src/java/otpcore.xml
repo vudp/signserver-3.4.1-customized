@@ -1,0 +1,22 @@
+<otpcore-configuration>
+	<session-factory name="otpcore">
+		<!--proxool alias-->
+		<property name="otpcore.proxool.pool_alias">test-db</property>
+		<!--property name {proxool.properties}-->
+		<property name="otpcore.proxool.properties">proxool.properties</property>
+		<!--autocommit {true or false}-->
+		<property name="otpcore.connection.autocommit">true</property>
+		<!--isolation {1,2,3,4}-->
+		<property name="otpcore.connection.isolation">2</property>
+		<!--enable log {true or false}-->
+		<property name="otpcore.log.enable">false</property>
+		<!--log4j  properties {log4j.properties}-->
+		<property name="otpcore.log4j.properties">log4j.properties</property>
+		<!--cache count {1,2,3...500}-->
+		<property name="otpcore.log.cache.count">1</property>
+		<!--table prefix {ftotp_}-->
+		<property name="otpcore.table.prefix">ftotp_</property>
+	    <!--user token}-->
+		<property name="otpcore.user.token.type">-1</property>
+	</session-factory>
+</otpcore-configuration>

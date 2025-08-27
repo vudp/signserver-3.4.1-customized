@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app version="2.5" xmlns="http://java.sun.com/xml/ns/javaee" xmlns:j2ee="http://java.sun.com/xml/ns/javaee" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd">
+    <servlet>
+        <servlet-name>Auth</servlet-name>
+        <servlet-class>org.signserver.u2f.tomica.servlet.Auth</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>Auth</servlet-name>
+        <url-pattern>/Auth</url-pattern>
+    </servlet-mapping>
+    <servlet>
+        <servlet-name>FinishAuth</servlet-name>
+        <servlet-class>org.signserver.u2f.tomica.servlet.FinishAuth</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>FinishAuth</servlet-name>
+        <url-pattern>/FinishAuth</url-pattern>
+    </servlet-mapping>
+    <servlet>
+        <servlet-name>FinishRegister</servlet-name>
+        <servlet-class>org.signserver.u2f.tomica.servlet.FinishRegister</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>FinishRegister</servlet-name>
+        <url-pattern>/FinishRegister</url-pattern>
+    </servlet-mapping>
+    <servlet>
+        <servlet-name>Register</servlet-name>
+        <servlet-class>org.signserver.u2f.tomica.servlet.Register</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>Register</servlet-name>
+        <url-pattern>/Register</url-pattern>
+    </servlet-mapping>
+</web-app>

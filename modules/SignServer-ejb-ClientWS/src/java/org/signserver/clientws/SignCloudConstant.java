@@ -1,0 +1,62 @@
+package org.signserver.clientws;
+
+public class SignCloudConstant {
+    
+    final public static int AUTHORISATION_METHOD_SMS = 1;
+    final public static int AUTHORISATION_METHOD_EMAIL = 2;
+    final public static int AUTHORISATION_METHOD_MOBILE = 3;
+    final public static int AUTHORISATION_METHOD_PASSCODE = 4;
+    final public static int AUTHORISATION_METHOD_UAF = 5;
+    
+    final public static int MESSAGING_MODE_ASYNCHRONOUS_CLIENTSERVER = 1;
+    final public static int MESSAGING_MODE_ASYNCHRONOUS_SERVERSERVER = 2;
+    final public static int MESSAGING_MODE_SYNCHRONOUS = 3;
+    
+    final public static String METADATA_PDFSIGNATURE_SIGNATUREIMAGE = "SIGNATUREIMAGE";
+    final public static String METADATA_PDFSIGNATURE_PAGENO = "PAGENO";
+    final public static String METADATA_PDFSIGNATURE_COORDINATE = "COORDINATE";
+    final public static String METADATA_PDFSIGNATURE_VISIBLESIGNATURE = "VISIBLESIGNATURE";
+    final public static String METADATA_PDFSIGNATURE_VISUALSTATUS = "VISUALSTATUS";
+    final public static String METADATA_PDFSIGNATURE_IMAGEANDTEXT = "IMAGEANDTEXT";
+    final public static String METADATA_PDFSIGNATURE_TEXTDIRECTION = "TEXTDIRECTION";
+    final public static String METADATA_PDFSIGNATURE_SHOWSIGNERINFO = "SHOWSIGNERINFO";
+    final public static String METADATA_PDFSIGNATURE_SIGNERINFOPREFIX = "SIGNERINFOPREFIX";
+    final public static String METADATA_PDFSIGNATURE_SHOWDATETIME = "SHOWDATETIME";
+    final public static String METADATA_PDFSIGNATURE_DATETIMEPREFIX = "DATETIMEPREFIX";
+    final public static String METADATA_PDFSIGNATURE_SHOWREASON = "SHOWREASON";
+    final public static String METADATA_PDFSIGNATURE_SIGNREASONPREFIX = "SIGNREASONPREFIX";
+    final public static String METADATA_PDFSIGNATURE_SIGNREASON = "SIGNREASON";
+    final public static String METADATA_PDFSIGNATURE_SHOWLOCATION = "SHOWLOCATION";
+    final public static String METADATA_PDFSIGNATURE_LOCATION = "LOCATION";
+    final public static String METADATA_PDFSIGNATURE_LOCATIONPREFIX = "LOCATIONPREFIX";
+    final public static String METADATA_PDFSIGNATURE_TEXTCOLOR = "TEXTCOLOR";
+    
+    
+    
+    final public static int RESPONSE_CODE_SUCCESS = 0;
+    final public static int RESPONSE_CODE_INVALID_IP_ADDRESS = 1000;
+    final public static int RESPONSE_CODE_INVALID_CREDENTIAL_DATA = 1001;
+    final public static int RESPONSE_CODE_INVALID_PARAMS = 1002;
+    final public static int RESPONSE_CODE_UNEXPECTED_EXCEPTION = 1003;
+    final public static int RESPONSE_CODE_INVALID_AUTHORISATION_CODE = 1004;
+    final public static int RESPONSE_CODE_AUTHORISATION_BLOCKED = 1005;
+    final public static int RESPONSE_CODE_AUTHORISATION_TIMEOUT = 1006;
+    final public static int RESPONSE_CODE_REQUEST_ACCEPTED = 1007;
+    final public static int RESPONSE_CODE_AGREEEMENT_NOT_FOUND = 1008;
+    final public static int RESPONSE_CODE_CERTIFICATE_IN_CORRESPONDING_AGREEMENT_NOT_ENROLLED = 1009;
+    final public static int RESPONSE_CODE_AGREEEMENT_EXITS = 1010;
+    
+    
+    final public static String RESPONSE_MESS_SUCCESS = "SUCCESS";
+    final public static String RESPONSE_MESS_INVALID_IP_ADDRESS = "INVALID IP ADDRESS";
+    final public static String RESPONSE_MESS_INVALID_CREDENTIAL_DATA = "INVALID CREDENTIAL DATA";
+    final public static String RESPONSE_MESS_INVALID_PARAMS = "INVALID PARAMS";
+    final public static String RESPONSE_MESS_UNEXPECTED_EXCEPTION = "UNEXPECTED EXCEPTION";
+    final public static String RESPONSE_MESS_INVALID_AUTHORISATION_CODE = "INVALID AUTHORISATION CODE";
+    final public static String RESPONSE_MESS_AUTHORISATION_BLOCKED = "AUTHORISATION BLOCKED";
+    final public static String RESPONSE_MESS_AUTHORISATION_TIMEOUT = "AUTHORISATION CODE TIMEOUT";
+    final public static String RESPONSE_MESS_REQUEST_ACCEPTED = "REQUEST ACCEPTED";
+    final public static String RESPONSE_MESS_AGREEEMENT_NOT_FOUND = "AGREEMENT NOT FOUND";
+    final public static String RESPONSE_MESS_CERTIFICATE_IN_CORRESPONDING_AGREEMENT_NOT_ENROLLED = "CERTIFICATE IN CORRESPONDING AGREEMENT NOT ENROLLED";
+    final public static String RESPONSE_MESS_AGREEEMENT_EXITS = "AGREEMENT EXITS";
+}

@@ -1,0 +1,108 @@
+//package org.signserver.clientws;
+package org.signserver.module.multisigner;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.security.KeyStoreException;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateException;
+import java.util.Collection;
+import java.util.Date;
+import java.util.Enumeration;
+import java.util.GregorianCalendar;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import javax.naming.NamingException;
+import javax.xml.datatype.DatatypeConfigurationException;
+import javax.xml.datatype.DatatypeFactory;
+import javax.xml.datatype.XMLGregorianCalendar;
+import org.apache.log4j.Logger;
+import org.cesecore.audit.AuditLogEntry;
+import org.cesecore.audit.audit.SecurityEventsAuditorSessionRemote;
+import org.cesecore.authorization.AuthorizationDeniedException;
+import org.cesecore.util.query.Criteria;
+import org.cesecore.util.query.Elem;
+import org.cesecore.util.query.QueryCriteria;
+import org.cesecore.util.query.clauses.Order;
+import org.cesecore.util.query.elems.RelationalOperator;
+import org.cesecore.util.query.elems.Term;
+import org.signserver.common.CryptoTokenAuthenticationFailureException;
+import org.signserver.common.CryptoTokenOfflineException;
+import org.signserver.common.GlobalConfiguration;
+import org.signserver.common.ICertReqData;
+import org.signserver.common.IllegalRequestException;
+import org.signserver.common.InvalidWorkerIdException;
+import org.signserver.common.PKCS10CertReqInfo;
+import org.signserver.common.ProcessRequest;
+import org.signserver.common.RequestAndResponseManager;
+import org.signserver.common.RequestContext;
+import org.signserver.common.ResyncException;
+import org.signserver.common.ServiceLocator;
+import org.signserver.common.SignServerException;
+import org.signserver.common.WorkerStatus;
+import org.signserver.ejb.interfaces.IGlobalConfigurationSession;
+import org.signserver.ejb.interfaces.IWorkerSession;
+
+public class AdminLayer {
+	private static final Logger LOG = Logger.getLogger(AdminLayer.class);
+	
+	private IWorkerSession.IRemote worker;
+    private IGlobalConfigurationSession.IRemote global;
+    private SecurityEventsAuditorSessionRemote auditor;
+    
+    private static AdminLayer instance;
+    
+    public static AdminLayer getInstance() {
+    	if(instance == null) {
+    		instance = new AdminLayer();
+    	}
+    	return instance;
+    }
+    
+    private AdminLayer() {
+    	try {
+	        if (worker == null) {
+	            worker = ServiceLocator.getInstance().lookupRemote(
+	                    IWorkerSession.IRemote.class);
+	        }
+	        if (global == null) {
+	            global = ServiceLocator.getInstance().lookupRemote(
+	                    IGlobalConfigurationSession.IRemote.class);
+	        }
+	        if (auditor == null) {
+	            auditor = ServiceLocator.getInstance().lookupRemote(
+	                    SecurityEventsAuditorSessionRemote.class);
+	        }
+    	} catch(NamingException e) {
+    		e.printStackTrace();
+    	}
+    }
+    
+    public void activateSigner(int signerId, String authenticationCode) {
+        try {
+        	LOG.info("Activate signer "+signerId+" for sign operation");
+            worker.activateSigner(signerId, authenticationCode);
+        } catch (Exception e) {
+        	LOG.error("Error while activating signer "+signerId);
+            e.printStackTrace();
+        }
+    }
+    
+    public boolean deactivateSigner(int signerId) {
+    	boolean result = false;
+	    try {
+	    	LOG.info("Deactivate signer "+signerId+" after siging completed");
+	    	result = worker.deactivateSigner(signerId);
+	    } catch (Exception e) {
+	    	LOG.error("Error while deactivating signer "+signerId);
+	        e.printStackTrace();
+	    }
+	    return result;
+    }
+}

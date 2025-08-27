@@ -1,0 +1,10 @@
+# $Id: qs_validator_configuration.properties 1729 2011-06-17 11:58:25Z netmackan $
+
+## Worker 15: Global properties
+GLOB.WORKERGENID.CLASSPATH = org.signserver.validationservice.server.XMLValidator
+GLOB.WORKERGENID.SIGNERTOKEN.CLASSPATH = org.signserver.server.cryptotokens.HardCodedCryptoToken
+
+
+## Worker 15: General properties
+WORKERGENID.NAME = XMLValidator
+WORKERGENID.AUTHTYPE=NOAUTH

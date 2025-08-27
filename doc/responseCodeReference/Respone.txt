@@ -1,0 +1,26 @@
+//1---ClientWS
+100: No worker with the given name could be found.
+
+
+//5---Contact
+
+500: Action not exist.
+
+//create
+511: Create successful.
+512: Username exist.
+513: CN not invalid.
+514: Certificate invalid.
+515: Connect databse fail.
+
+//update
+521: Update successful.
+522: Username not exist.
+
+//delete
+531: Delete successful.
+
+
+
+
+

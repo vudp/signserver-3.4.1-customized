@@ -1,0 +1,101 @@
+/*
+To change this license header, choose License Headers in Project Properties.
+To change this template file, choose Tools | Templates
+and open the template in the editor.
+*/
+/* 
+    Created on : Sep 22, 2016, 2:35:03 PM
+    Author     : tbao
+*/
+
+#services{
+    /*height:400px;*/
+    background: url("../images/slide/slide.png") center center fixed; ;
+    background-size: contain;
+    /*border: 2px solid darkgray;*/
+    color: #000; 
+    background-repeat: no-repeat;
+
+    -webkit-background-size: cover;
+    -moz-background-size: cover;
+    -o-background-size: cover;
+    background-size: cover;
+    background-position: inherit;
+}
+
+.bgcontent {
+    position: relative;
+    z-index: 5;
+    /*  height: 250px;
+      width: 300px;*/
+    color: #000;
+    font-size: 400%;
+    /*padding: 20px;*/
+/*    background: url("../images/slide/slide.png") no-repeat;
+    opacity: 0.4;*/
+    background-color: #000;
+     background-position: top center;
+    background-attachment: fixed;
+    background-size: cover;
+    padding-top: 25px;
+}
+
+.bgcontent .imgbg{
+    position: absolute;
+    z-index: -1;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: url(../images/slide/slide.png) ;
+    opacity: .3;
+    background-attachment: fixed;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-size: cover;
+    /*height: 698px;*/
+}
+
+@media (min-width: 1220px){
+/*    .bgcontent .imgbg{
+        height: 698px;
+    }*/
+}
+
+@media (min-width: 991px)  and (max-width: 1220px){
+/*    .bgcontent .imgbg{
+        height: 482px;
+    }*/
+    .list1 li a{
+        margin-top: -150px;
+        margin-left: 15px;
+    }
+}
+
+@media (min-width: 768px) and (max-width: 991px) {
+/*    .bgcontent .imgbg{
+        height: 500px;
+    }*/
+
+    .list1 li a{
+        margin-top: -150px;
+        margin-left: 15px;
+    }
+}
+
+@media (max-width: 767px) {
+/*    .bgcontent .imgbg{
+        height: 710px;
+    }*/
+
+    .list1 li a{
+        margin-top: -150px;
+        margin-left: 15px;
+    }
+}
+
+.fone{
+    color: #17A2C8;
+    font-size: 30px;
+    padding-top: 25px;
+}

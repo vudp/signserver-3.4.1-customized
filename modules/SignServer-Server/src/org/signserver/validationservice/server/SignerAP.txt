@@ -1,0 +1,1657 @@
+package org.signserver.validationservice.server;
+
+import org.signserver.common.*;
+import org.signserver.common.dbdao.*;
+import org.signserver.common.util.*;
+import org.signserver.ejb.interfaces.IWorkerSession;
+import org.signserver.server.WorkerContext;
+import org.signserver.server.signers.BaseSigner;
+
+import javax.persistence.EntityManager;
+
+import org.signserver.server.archive.Archivable;
+import org.signserver.server.archive.DefaultArchivable;
+
+import java.io.*;
+import java.util.*;
+import java.security.cert.*;
+
+import javax.xml.bind.DatatypeConverter;
+
+import java.util.LinkedList;
+import java.util.List;
+
+import org.apache.log4j.Logger;
+import org.signserver.server.BaseProcessable;
+import org.signserver.validationservice.common.ValidateRequest;
+import org.signserver.validationservice.common.ValidationServiceConstants;
+
+import java.text.SimpleDateFormat;
+
+import org.signserver.common.util.*;
+import org.signserver.validationservice.server.dcsigner.*;
+
+import java.security.MessageDigest;
+import java.security.Security;
+import java.security.Signature;
+
+import org.bouncycastle.asn1.ASN1Encoding;
+import org.bouncycastle.asn1.DERObjectIdentifier;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.DigestInfo;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+
+import com.tomicalab.cag360.connector.ws.*;
+import vn.mobile_id.endpoint.service.datatype.*;
+import vn.mobile_id.endpoint.service.datatype.params.*;
+import vn.mobile_id.endpoint.client.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.signserver.clientws.ConnectorSrv;
+
+public class SignerAP extends BaseProcessable {
+
+	private IValidationService validationService;
+	private List<String> fatalErrors;
+	private static final Logger LOG = Logger.getLogger(SignerAP.class);
+
+	private static final String CONTENT_TYPE = "text/xml";
+	private String ResponseMessage = Defines.ERROR_UNKNOWN;
+	private int ResponseCode = Defines.CODE_UNKNOWN;
+	private static String WORKERNAME = "SignerAP";
+
+	private static String PDFMINETYPE = "pdf";
+	private static String XMLMINETYPE = "text/html";
+
+	private static String HASH_SHA1 = "SHA-1";
+	private static String HASH_SHA256 = "SHA-256";
+	private static String HASH_SHA384 = "SHA-384";
+	private static String HASH_SHA512 = "SHA-512";
+
+	static {
+		BouncyCastleProvider provider = new BouncyCastleProvider();
+		Security.addProvider(provider);
+	}
+
+	@Override
+	public void init(int workerId, WorkerConfig config,
+			WorkerContext workerContext, EntityManager workerEM) {
+		// TODO Auto-generated method stub
+		super.init(workerId, config, workerContext, workerEM);
+		fatalErrors = new LinkedList<String>();
+		try {
+			validationService = createValidationService(config);
+		} catch (SignServerException e) {
+			final String error = "Could not get crypto token: "
+					+ e.getMessage();
+			LOG.error(error);
+			fatalErrors.add(error);
+		}
+	}
+
+	/**
+	 * Creating a Validation Service depending on the TYPE setting
+	 * 
+	 * @param config
+	 *            configuration containing the validation service to create
+	 * @return a non initialized group key service.
+	 */
+	private IValidationService createValidationService(WorkerConfig config)
+			throws SignServerException {
+		String classPath = config.getProperties().getProperty(
+				ValidationServiceConstants.VALIDATIONSERVICE_TYPE,
+				ValidationServiceConstants.DEFAULT_TYPE);
+		IValidationService retval = null;
+		String error = null;
+		try {
+			if (classPath != null) {
+				Class<?> implClass = Class.forName(classPath);
+				retval = (IValidationService) implClass.newInstance();
+				retval.init(workerId, config, em, getCryptoToken());
+			}
+		} catch (ClassNotFoundException e) {
+			error = "Error instatiating Validation Service, check that the TYPE setting of workerid : "
+					+ workerId + " have the correct class path.";
+			LOG.error(error, e);
+
+		} catch (IllegalAccessException e) {
+			error = "Error instatiating Validation Service, check that the TYPE setting of workerid : "
+					+ workerId + " have the correct class path.";
+			LOG.error(error, e);
+		} catch (InstantiationException e) {
+			error = "Error instatiating Validation Service, check that the TYPE setting of workerid : "
+					+ workerId + " have the correct class path.";
+			LOG.error(error, e);
+
+		}
+
+		if (error != null) {
+			fatalErrors.add(error);
+		}
+
+		return retval;
+	}
+
+	@Override
+	public ProcessResponse processData(ProcessRequest signRequest,
+			RequestContext requestContext) throws IllegalRequestException,
+			CryptoTokenOfflineException, SignServerException {
+		// TODO Auto-generated method stub
+		ProcessResponse signResponse = null;
+
+		final ISignRequest sReq = (ISignRequest) signRequest;
+
+		byte[] data = (byte[]) sReq.getRequestData();
+		String channelName = RequestMetadata.getInstance(requestContext).get(
+				Defines._CHANNEL);
+
+		String user = RequestMetadata.getInstance(requestContext).get(
+				Defines._USER);
+		String pkiSim = RequestMetadata.getInstance(requestContext).get(
+				Defines._PKISIM);
+		String isHashed = RequestMetadata.getInstance(requestContext).get(
+				Defines._ISHASHED);
+		String signatureFormat = RequestMetadata.getInstance(requestContext)
+				.get(Defines._SIGNATUREFORMAT);
+		String algorithm = RequestMetadata.getInstance(requestContext).get(
+				Defines._ALGORITHM);
+		String displayData = RequestMetadata.getInstance(requestContext).get(
+				Defines._DISPLAYMESSAGE);
+		String messageMode = RequestMetadata.getInstance(requestContext).get(
+				Defines._MESSAGEMODE);
+		String method = RequestMetadata.getInstance(requestContext).get(
+				Defines._METHOD);
+		String requestId = RequestMetadata.getInstance(requestContext).get(
+				"RequestID");
+
+		byte[] errors = ExtFunc.randomHex(10);
+		String archiveId = createArchiveId(errors,
+				(String) requestContext.get(RequestContext.TRANSACTION_ID));
+		// check license for SignerAP
+		LOG.info("Checking license for SignerAP.");
+		License licInfo = License.getInstance();
+		if (licInfo.getStatusCode() != 0) {
+			return new GenericSignResponse(sReq.getRequestID(), archiveId,
+					Defines.CODE_INFO_LICENSE, licInfo.getStatusDescription());
+		} else {
+			if (!licInfo.checkWorker(WORKERNAME)) {
+				return new GenericSignResponse(sReq.getRequestID(), archiveId,
+						Defines.CODE_INFO_LICENSE_NOTSUPPORT,
+						Defines.ERROR_INFO_LICENSE_NOTSUPPORT);
+			}
+		}
+		if (method.compareTo(Defines.SIGNERAP_SIGREG) == 0) {
+			// signature format
+			if (signatureFormat != null) {
+				if (!signatureFormat.equals(Defines.SIGNERAP_SIGNFORMAT_P7)) {
+					signatureFormat = Defines.SIGNERAP_SIGNFORMAT_P1;
+				}
+			} else {
+				signatureFormat = Defines.SIGNERAP_SIGNFORMAT_P1;
+			}
+
+			// message mode
+			if (messageMode != null) {
+				if (!messageMode.equals(Defines.SIGNERAP_SYNC)) {
+					messageMode = Defines.SIGNERAP_ASYNC;
+				}
+			} else {
+				messageMode = Defines.SIGNERAP_ASYNC;
+			}
+
+			// hash
+			if (isHashed != null) {
+				if (!isHashed.equals(Defines.TRUE))
+					isHashed = Defines.FALSE;
+			} else {
+				isHashed = Defines.FALSE;
+			}
+
+			if (signatureFormat.equals(Defines.SIGNERAP_SIGNFORMAT_P1)) {
+				// PKCS#1
+				byte[] plainSig = null;
+				if (isHashed.equals(Defines.TRUE)) {
+					if (data.length != 20) {
+						LOG.error("Data should be hashed. Expected length is 20 bytes");
+						ResponseMessage = Defines.ERROR_NOBASE64FILE;
+						ResponseCode = Defines.CODE_NOBASE64FILE;
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					} else {
+						try {
+							DERObjectIdentifier sha1oid_ = new DERObjectIdentifier(
+									"1.3.14.3.2.26");
+							AlgorithmIdentifier sha1aid_ = new AlgorithmIdentifier(
+									sha1oid_, null);
+							DigestInfo di = new DigestInfo(sha1aid_, data);
+
+							plainSig = di.getEncoded(ASN1Encoding.DER);
+						} catch (Exception e) {
+							LOG.error("Something wrong: " + e.getMessage());
+							e.printStackTrace();
+							ResponseMessage = Defines.ERROR_UNKNOWN;
+							ResponseCode = Defines.CODE_UNKNOWN;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim, null, null,
+									ResponseMessage, null);
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE, errors, archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(), errors, null, null,
+									archiveId, archivables, ResponseCode,
+									ResponseMessage, null);
+							return signResponse;
+						}
+					}
+				} else {
+					// non-hash
+					try {
+						MessageDigest md = MessageDigest.getInstance(HASH_SHA1);
+						md.update(data);
+						data = md.digest();
+						DERObjectIdentifier sha1oid_ = new DERObjectIdentifier(
+								"1.3.14.3.2.26");
+						AlgorithmIdentifier sha1aid_ = new AlgorithmIdentifier(
+								sha1oid_, null);
+						DigestInfo di = new DigestInfo(sha1aid_, data);
+						plainSig = di.getEncoded(ASN1Encoding.DER);
+					} catch (Exception e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						e.printStackTrace();
+						ResponseMessage = Defines.ERROR_UNKNOWN;
+						ResponseCode = Defines.CODE_UNKNOWN;
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, null,
+								ResponseMessage, null);
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				}
+
+				String transCode = "";
+				if (requestId != null) {
+					String storeReqId = DBConnector.getInstances()
+							.mssp_MSSPGetTransaction(user, channelName);
+					LOG.info("Stored TransId: " + storeReqId);
+					if (storeReqId == null
+							|| storeReqId.compareTo(requestId) != 0) {
+						ResponseMessage = Defines.ERROR_NOTMATCHID;
+						ResponseCode = Defines.CODE_NOTMATCHID;
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+					requestId = ExtFunc.generateApTransId();
+					transCode = storeReqId;
+
+				} else {
+					String[] tranIds = ExtFunc.generateApTransIdAndRequestId();
+					requestId = tranIds[0];
+					transCode = tranIds[1];
+				}
+
+				if (displayData == null || displayData.compareTo("") == 0) {
+					displayData = "Transaction code: " + transCode; // by
+																	// default
+				}
+				if (displayData.indexOf("{transcode}") == -1) {
+					displayData = displayData.concat(" ").concat(transCode);
+				} else {
+					displayData = displayData.replace("{transcode}", transCode);
+				}
+
+				/*
+				com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+						.getInstance().getWS();
+
+				com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+				wsRequest.setFunctionName(Constant.F_SIM_TOMICAMSSP_SIGREQUEST);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsPhone = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsPhone.setKey(Constant.K_MOBILENO);
+				wsPhone.setValue(pkiSim);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsMessageMode = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsMessageMode.setKey(Constant.K_MESSAGEMODE);
+				wsMessageMode.setValue(messageMode);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsDataDisplay = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsDataDisplay.setKey(Constant.K_DISPLAYDATA);
+				wsDataDisplay.setValue(displayData);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsApTransId = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsApTransId.setKey(Constant.K_APTRANSID);
+				wsApTransId.setValue(requestId);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsSigFormat = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsSigFormat.setKey(Constant.K_SIGNATUREFORMAT);
+				wsSigFormat.setValue(signatureFormat);
+
+				wsRequest.getSData().add(wsDataDisplay);
+				wsRequest.getSData().add(wsPhone);
+				wsRequest.getSData().add(wsMessageMode);
+				wsRequest.getSData().add(wsApTransId);
+				wsRequest.getSData().add(wsSigFormat);
+				wsRequest.setBData(plainSig);
+
+				// insert mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, transCode, null, null,
+						DatatypeConverter.printBase64Binary(plainSig));
+
+				ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+				int responseCode = wsResponse.getResponseCode();
+				String responseMess = wsResponse.getResponseMessage();
+
+				if (responseCode == Defines.CODE_SUCCESS) {
+					if (messageMode.compareTo(Defines.SIGNERAP_SYNC) == 0) {
+						String signature = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_SIGNATURE);
+						String signatureformat = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_SIGNATUREFORMAT);
+						String certificate = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_CERTIFICATE);
+
+						boolean isValidSignature = false;
+						boolean isValidCertificate = false;
+						X509Certificate x509 = null;
+						if (signatureformat
+								.equals(Defines.SIGNERAP_SIGNFORMAT_P1)) {
+							// PKCS#1
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+
+							try {
+								isValidSignature = ExtFunc
+										.verifyPKCS1Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												certAgreement);
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+
+								x509 = ExtFunc.getCertificate(certAgreement);
+
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						} else {
+							// PKCS#7
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+
+							try {
+								isValidSignature = ExtFunc
+										.verifyPKCS7Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												x509.getSerialNumber()
+														.toString(16));
+
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+								x509 = ExtFunc.getCertificate(certAgreement);
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						}
+						if (isValidCertificate && isValidSignature) {
+							LOG.info("Valid signature");
+							ResponseCode = Defines.CODE_SUCCESS;
+							ResponseMessage = Defines.SUCCESS;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim,
+									ExtFunc.generateApTransIdAndRequestId()[1],
+									null, responseMess, null);
+
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE,
+											DatatypeConverter
+													.parseBase64Binary(signature),
+											archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(),
+									DatatypeConverter
+											.parseBase64Binary(signature),
+									x509, null, archiveId, archivables,
+									ResponseCode, ResponseMessage);
+							return signResponse;
+						} else {
+							LOG.error("Invalid signature");
+							ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+							ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim, null, null,
+									ResponseMessage, null);
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE, errors, archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(), errors, null, null,
+									archiveId, archivables, ResponseCode,
+									ResponseMessage, null);
+							return signResponse;
+						}
+					} else {
+						// messagemode = Asynch
+						String msspTransId = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_MSSPTRANSID);
+
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, msspTransId,
+								responseMess, null);
+
+						ResponseCode = Defines.CODE_MSSP_REQUEST_ACCEPTED;
+						ResponseMessage = Defines.MSSP_REQUEST_ACCEPTED
+								.replace("{transcode}", transCode);
+
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				} else {
+					// Connector response no success
+					ResponseMessage = responseMess;
+					ResponseCode = Defines.CODE_UNKNOWN;
+					// update mssp transaction
+					DBConnector.getInstances()
+							.mssp_InsertTransaction(user, channelName, pkiSim,
+									null, null, responseMess, null);
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									errors, archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							errors, null, null, archiveId, archivables,
+							ResponseCode, ResponseMessage, null);
+					return signResponse;
+				}
+				*/
+				
+				// get endpoint info
+				EndPointConfig epc = DBConnector.getInstances().getEndPointConfig();
+				
+				Request request = new Request();
+				request.setAction("requestMobileSignature");
+				
+				MSSSignatureReq mssSignatureReq = new MSSSignatureReq();
+				mssSignatureReq.setMobileNumber(pkiSim);
+				mssSignatureReq.setMessageMode(messageMode);
+				mssSignatureReq.setApTransactionId(requestId);
+				mssSignatureReq.setSignatureFormat(signatureFormat);
+				mssSignatureReq.setDtbd(displayData);
+				mssSignatureReq.setDtbs(dtbs);
+				
+				request.setMssSignatureReq(mssSignatureReq);
+				
+				ObjectMapper op = new ObjectMapper();
+				Response response = null;
+				
+				// insert mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, transCode, null, null,
+						DatatypeConverter.printBase64Binary(plainSig));
+				
+				try {
+					String payload = op.writeValueAsString(request);
+					Endpoint ep = new Endpoint(epc.getUrl());
+					ep.setKeyID(epc.getKeyId());
+					ep.setAppID(epc.getAppId());
+					ep.setClientIP(epc.getHost());
+					
+					String respPayload = ep.call(payload);
+					response = op.readValue(respPayload, Response.class);
+					
+				} catch(Exception e) {
+					e.printStackTrace();
+					LOG.error("Error while calling endpoint service.");
+					billCode = ExtFunc.getBillCode();
+					pData = ExtFunc.genResponseMessage(Defines.CODE_ENDPOINTEXP,
+							Defines.ERROR_ENDPOINTEXP, channelName, user, billCode);
+					DBConnector.getInstances().writeLogToDataBaseOutside(
+							functionName, username,
+							ExtFunc.getRequestIP(wsContext), user, Defines.ERROR_ENDPOINTEXP,
+							Defines.CODE_ENDPOINTEXP, sslSubDn, sslIseDn, sslSnb, idTag,
+							channelName, xmlData, pData, billCode, unsignedData,
+							signedData);
+
+					return new TransactionInfo(pData);
+				}
+				
+				String responseMess = response.getStatus().getResponseMesssage();
+				
+				if(response.getStatus().getResponseCode() == 0) {
+					if (messageMode.compareTo(Defines.SIGNERAP_SYNC) == 0) {
+						
+						String signature = response.getMssSignatureResp().getSignature();
+						String signatureformat = response.getMssSignatureResp().getSignatureFormat();
+						String certificate = response.getMssSignatureResp().getCertificate();
+
+						boolean isValidSignature = false;
+						boolean isValidCertificate = false;
+						X509Certificate x509 = null;
+						if (signatureformat
+								.equals(Defines.SIGNERAP_SIGNFORMAT_P1)) {
+							// PKCS#1
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+
+							try {
+								isValidSignature = ExtFunc
+										.verifyPKCS1Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												certAgreement);
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+
+								x509 = ExtFunc.getCertificate(certAgreement);
+
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						} else {
+							// PKCS#7
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+
+							try {
+								isValidSignature = ExtFunc
+										.verifyPKCS7Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												x509.getSerialNumber()
+														.toString(16));
+
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+								x509 = ExtFunc.getCertificate(certAgreement);
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						}
+						if (isValidCertificate && isValidSignature) {
+							LOG.info("Valid signature");
+							ResponseCode = Defines.CODE_SUCCESS;
+							ResponseMessage = Defines.SUCCESS;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim,
+									ExtFunc.generateApTransIdAndRequestId()[1],
+									null, responseMess, null);
+
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE,
+											DatatypeConverter
+													.parseBase64Binary(signature),
+											archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(),
+									DatatypeConverter
+											.parseBase64Binary(signature),
+									x509, null, archiveId, archivables,
+									ResponseCode, ResponseMessage);
+							return signResponse;
+						} else {
+							LOG.error("Invalid signature");
+							ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+							ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim, null, null,
+									ResponseMessage, null);
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE, errors, archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(), errors, null, null,
+									archiveId, archivables, ResponseCode,
+									ResponseMessage, null);
+							return signResponse;
+						}
+					} else {
+						// messagemode = Asynch
+						String msspTransId = response.getMssSignatureResp().getMsspTransactionId();
+
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, msspTransId,
+								responseMess, null);
+
+						ResponseCode = Defines.CODE_MSSP_REQUEST_ACCEPTED;
+						ResponseMessage = Defines.MSSP_REQUEST_ACCEPTED
+								.replace("{transcode}", transCode);
+
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				} else {
+					// Connector response no success
+					ResponseMessage = responseMess;
+					ResponseCode = Defines.CODE_UNKNOWN;
+					// update mssp transaction
+					DBConnector.getInstances()
+							.mssp_InsertTransaction(user, channelName, pkiSim,
+									null, null, responseMess, null);
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									errors, archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							errors, null, null, archiveId, archivables,
+							ResponseCode, ResponseMessage, null);
+					return signResponse;
+				}
+			} else {
+				// PKCS#7
+				byte[] plainSig = data;
+
+				String transCode = "";
+				if (requestId != null) {
+					String storeReqId = DBConnector.getInstances()
+							.mssp_MSSPGetTransaction(user, channelName);
+					LOG.info("Stored TransId: " + storeReqId);
+					if (storeReqId == null
+							|| storeReqId.compareTo(requestId) != 0) {
+						ResponseMessage = Defines.ERROR_NOTMATCHID;
+						ResponseCode = Defines.CODE_NOTMATCHID;
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+					requestId = ExtFunc.generateApTransId();
+					transCode = storeReqId;
+
+				} else {
+					String[] tranIds = ExtFunc.generateApTransIdAndRequestId();
+					requestId = tranIds[0];
+					transCode = tranIds[1];
+				}
+
+				if (displayData == null || displayData.compareTo("") == 0) {
+					displayData = "Transaction code: " + transCode; // by
+																	// default
+				}
+				if (displayData.indexOf("{transcode}") == -1) {
+					displayData = displayData.concat(" ").concat(transCode);
+				} else {
+					displayData = displayData.replace("{transcode}", transCode);
+				}
+
+				com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+						.getInstance().getWS();
+
+				com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+				wsRequest.setFunctionName(Constant.F_SIM_TOMICAMSSP_SIGREQUEST);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsPhone = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsPhone.setKey(Constant.K_MOBILENO);
+				wsPhone.setValue(pkiSim);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsMessageMode = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsMessageMode.setKey(Constant.K_MESSAGEMODE);
+				wsMessageMode.setValue(messageMode);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsDataDisplay = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsDataDisplay.setKey(Constant.K_DISPLAYDATA);
+				wsDataDisplay.setValue(displayData);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsApTransId = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsApTransId.setKey(Constant.K_APTRANSID);
+				wsApTransId.setValue(requestId);
+
+				com.tomicalab.cag360.connector.ws.MetaData wsSigFormat = new com.tomicalab.cag360.connector.ws.MetaData();
+				wsSigFormat.setKey(Constant.K_SIGNATUREFORMAT);
+				wsSigFormat.setValue(signatureFormat);
+
+				wsRequest.getSData().add(wsDataDisplay);
+				wsRequest.getSData().add(wsPhone);
+				wsRequest.getSData().add(wsMessageMode);
+				wsRequest.getSData().add(wsApTransId);
+				wsRequest.getSData().add(wsSigFormat);
+				wsRequest.setBData(plainSig);
+
+				// insert mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, transCode, null, null,
+						DatatypeConverter.printBase64Binary(plainSig));
+
+				ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+				int responseCode = wsResponse.getResponseCode();
+				String responseMess = wsResponse.getResponseMessage();
+
+				if (responseCode == Defines.CODE_SUCCESS) {
+					if (messageMode.compareTo(Defines.SIGNERAP_SYNC) == 0) {
+						String signature = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_SIGNATURE);
+						String signatureformat = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_SIGNATUREFORMAT);
+						String certificate = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_CERTIFICATE);
+
+						boolean isValidSignature = false;
+						boolean isValidCertificate = false;
+						X509Certificate x509 = null;
+						if (signatureformat
+								.equals(Defines.SIGNERAP_SIGNFORMAT_P1)) {
+							// PKCS#1
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+							try {
+								x509 = ExtFunc.getCertificate(certAgreement);
+
+								isValidSignature = ExtFunc
+										.verifyPKCS1Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												certAgreement);
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						} else {
+							// PKCS#7
+							String certAgreement = DBConnector.getInstances()
+									.authGetCertSimPKI(channelName, user);
+
+							String dataToSign = DBConnector.getInstances()
+									.mssp_GetDataToSign(user, channelName);
+							try {
+								x509 = ExtFunc.getCertificate(certAgreement);
+
+								isValidSignature = ExtFunc
+										.verifyPKCS7Signature(
+												DatatypeConverter
+														.parseBase64Binary(dataToSign),
+												DatatypeConverter
+														.parseBase64Binary(signature),
+												x509.getSerialNumber()
+														.toString(16));
+
+								isValidCertificate = CertificateStatus
+										.isCertificateValid(certAgreement);
+
+							} catch (Exception e) {
+								LOG.error("Error while validating signature");
+								LOG.error("Something wrong: " + e.getMessage());
+								e.printStackTrace();
+								ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+								ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+								// update mssp transaction
+								DBConnector.getInstances()
+										.mssp_InsertTransaction(user,
+												channelName, pkiSim, null,
+												null, ResponseMessage, null);
+								archiveId = createArchiveId(
+										errors,
+										(String) requestContext
+												.get(RequestContext.TRANSACTION_ID));
+								final Collection<? extends Archivable> archivables = Arrays
+										.asList(new DefaultArchivable(
+												Archivable.TYPE_RESPONSE,
+												CONTENT_TYPE, errors, archiveId));
+								signResponse = new GenericSignResponse(
+										sReq.getRequestID(), errors, null,
+										null, archiveId, archivables,
+										ResponseCode, ResponseMessage, null);
+								return signResponse;
+							}
+						}
+						if (isValidCertificate && isValidSignature) {
+							LOG.info("Valid signature");
+							ResponseCode = Defines.CODE_SUCCESS;
+							ResponseMessage = Defines.SUCCESS;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim,
+									ExtFunc.generateApTransIdAndRequestId()[1],
+									null, responseMess, null);
+
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE,
+											DatatypeConverter
+													.parseBase64Binary(signature),
+											archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(),
+									DatatypeConverter
+											.parseBase64Binary(signature),
+									x509, null, archiveId, archivables,
+									ResponseCode, ResponseMessage);
+							return signResponse;
+						} else {
+							LOG.error("Invalid signature");
+							ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+							ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+							// update mssp transaction
+							DBConnector.getInstances().mssp_InsertTransaction(
+									user, channelName, pkiSim, null, null,
+									ResponseMessage, null);
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE, errors, archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(), errors, null, null,
+									archiveId, archivables, ResponseCode,
+									ResponseMessage, null);
+							return signResponse;
+						}
+					} else {
+						// messagemode = Asynch
+						String msspTransId = com.tomicalab.cag360.connector.ws.Utils
+								.getMetaDataValue(wsResponse.getSData(),
+										Constant.K_MSSPTRANSID);
+
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, msspTransId,
+								responseMess, null);
+
+						ResponseCode = Defines.CODE_MSSP_REQUEST_ACCEPTED;
+						ResponseMessage = Defines.MSSP_REQUEST_ACCEPTED
+								.replace("{transcode}", transCode);
+
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				} else {
+					// Connector response no success
+					ResponseMessage = responseMess;
+					ResponseCode = Defines.CODE_UNKNOWN;
+					// update mssp transaction
+					DBConnector.getInstances()
+							.mssp_InsertTransaction(user, channelName, pkiSim,
+									null, null, responseMess, null);
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									errors, archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							errors, null, null, archiveId, archivables,
+							ResponseCode, ResponseMessage, null);
+					return signResponse;
+				}
+			}
+
+		} else if (method.compareTo(Defines.SIGNERAP_STAREG) == 0) {
+			String msspId = DBConnector.getInstances().mssp_GetMsspId(user,
+					requestId, channelName);
+			LOG.info("MSSP TransId: " + msspId);
+			if (msspId == null) {
+				ResponseMessage = Defines.ERROR_NOTMATCHID;
+				ResponseCode = Defines.CODE_NOTMATCHID;
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			}
+
+			com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+					.getInstance().getWS();
+
+			com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+			wsRequest.setFunctionName(Constant.F_SIM_TOMICAMSSP_STAREQUEST);
+
+			com.tomicalab.cag360.connector.ws.MetaData wsPhone = new com.tomicalab.cag360.connector.ws.MetaData();
+			wsPhone.setKey(Constant.K_MOBILENO);
+			wsPhone.setValue(pkiSim);
+
+			com.tomicalab.cag360.connector.ws.MetaData wsMsspId = new com.tomicalab.cag360.connector.ws.MetaData();
+			wsMsspId.setKey(Constant.K_MSSPTRANSID);
+			wsMsspId.setValue(msspId);
+
+			com.tomicalab.cag360.connector.ws.MetaData wsApTransId = new com.tomicalab.cag360.connector.ws.MetaData();
+			wsApTransId.setKey(Constant.K_APTRANSID);
+			wsApTransId.setValue(ExtFunc.generateApTransId());
+
+			wsRequest.getSData().add(wsPhone);
+			wsRequest.getSData().add(wsMsspId);
+			wsRequest.getSData().add(wsApTransId);
+
+			ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+			int responseCode = wsResponse.getResponseCode();
+			String responseMess = wsResponse.getResponseMessage();
+
+			if (responseCode == Defines.CODE_SUCCESS) {
+
+				String signature = com.tomicalab.cag360.connector.ws.Utils
+						.getMetaDataValue(wsResponse.getSData(),
+								Constant.K_SIGNATURE);
+
+				String signatureformat = com.tomicalab.cag360.connector.ws.Utils
+						.getMetaDataValue(wsResponse.getSData(),
+								Constant.K_SIGNATUREFORMAT);
+
+				String certificate = com.tomicalab.cag360.connector.ws.Utils
+						.getMetaDataValue(wsResponse.getSData(),
+								Constant.K_CERTIFICATE);
+
+				boolean isValidSignature = false;
+				boolean isValidCertificate = false;
+				X509Certificate x509 = null;
+				if (signatureformat.equals(Defines.SIGNERAP_SIGNFORMAT_P1)) {
+					// PKCS#1
+					String certAgreement = DBConnector.getInstances()
+							.authGetCertSimPKI(channelName, user);
+
+					String dataToSign = DBConnector.getInstances()
+							.mssp_GetDataToSign(user, channelName);
+					try {
+						x509 = ExtFunc.getCertificate(certAgreement);
+
+						isValidSignature = ExtFunc
+								.verifyPKCS1Signature(DatatypeConverter
+										.parseBase64Binary(dataToSign),
+										DatatypeConverter
+												.parseBase64Binary(signature),
+										certAgreement);
+						isValidCertificate = CertificateStatus
+								.isCertificateValid(certAgreement);
+
+					} catch (Exception e) {
+						LOG.error("Error while validating signature");
+						LOG.error("Something wrong: " + e.getMessage());
+						e.printStackTrace();
+						ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+						ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, null,
+								ResponseMessage, null);
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				} else {
+					// PKCS#7
+					String certAgreement = DBConnector.getInstances()
+							.authGetCertSimPKI(channelName, user);
+
+					String dataToSign = DBConnector.getInstances()
+							.mssp_GetDataToSign(user, channelName);
+					try {
+						x509 = ExtFunc.getCertificate(certAgreement);
+
+						isValidSignature = ExtFunc
+								.verifyPKCS7Signature(DatatypeConverter
+										.parseBase64Binary(dataToSign),
+										DatatypeConverter
+												.parseBase64Binary(signature),
+										x509.getSerialNumber().toString(16));
+
+						isValidCertificate = CertificateStatus
+								.isCertificateValid(certAgreement);
+
+					} catch (Exception e) {
+						LOG.error("Error while validating signature");
+						LOG.error("Something wrong: " + e.getMessage());
+						e.printStackTrace();
+						ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+						ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+						// update mssp transaction
+						DBConnector.getInstances().mssp_InsertTransaction(user,
+								channelName, pkiSim, null, null,
+								ResponseMessage, null);
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				}
+				if (isValidCertificate && isValidSignature) {
+					LOG.info("Valid signature");
+					ResponseCode = Defines.CODE_SUCCESS;
+					ResponseMessage = Defines.SUCCESS;
+					// update mssp transaction
+					DBConnector.getInstances().mssp_InsertTransaction(user,
+							channelName, pkiSim,
+							ExtFunc.generateApTransIdAndRequestId()[1], null,
+							responseMess, null);
+
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									DatatypeConverter
+											.parseBase64Binary(signature),
+									archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							DatatypeConverter.parseBase64Binary(signature),
+							x509, null, archiveId, archivables, ResponseCode,
+							ResponseMessage);
+					return signResponse;
+				} else {
+					LOG.error("Invalid signature");
+					ResponseMessage = Defines.ERROR_INVALIDSIGNATURE;
+					ResponseCode = Defines.CODE_INVALIDSIGNATURE;
+					// update mssp transaction
+					DBConnector.getInstances().mssp_InsertTransaction(user,
+							channelName, pkiSim, null, null, ResponseMessage,
+							null);
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									errors, archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							errors, null, null, archiveId, archivables,
+							ResponseCode, ResponseMessage, null);
+					return signResponse;
+				}
+
+			} else if (responseCode == Constant.CODE_MSSP_ERROR_EXPIREDTRANS) {
+				LOG.info("Transaction expired");
+				ResponseMessage = Defines.MSSP_TRANSACTION_EXPIRED;
+				ResponseCode = Defines.CODE_MSSP_TRANSACTION_EXPIRED;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			} else if (responseCode == Constant.CODE_MSSP_ERROR_NOTRANSFOUND) {
+				LOG.info("No transaction found");
+				ResponseMessage = Defines.MSSP_NO_TRANSACTION_FOUND;
+				ResponseCode = Defines.CODE_MSSP_NO_TRANSACTION_FOUND;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			} else if (responseCode == Constant.CODE_MSSP_OUTSTANDINGTRANS) {
+				LOG.info("Outstanding transaction");
+				ResponseMessage = Defines.MSSP_OUT_TRANSACTION;
+				ResponseCode = Defines.CODE_MSSP_OUT_TRANSACTION;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			} else if (responseCode == Constant.CODE_MSSP_NOCERTFOUND) {
+				LOG.info("Certificate hasn't been registered.");
+				ResponseMessage = Defines.MSSP_NOCERTIFICATE;
+				ResponseCode = Defines.CODE_MSSP_NOCERTIFICATE;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			} else if (responseCode == Constant.CODE_MSSP_TRANSCANCELED) {
+				LOG.info("Transaction has been canceled.");
+				ResponseMessage = Defines.MSSP_TRANSCANCELED;
+				ResponseCode = Defines.CODE_MSSP_TRANSCANCELED;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			} else {
+				ResponseMessage = responseMess;/* Defines.ERROR_UNKNOWN; */
+				ResponseCode = Defines.CODE_UNKNOWN;
+				// update mssp transaction
+				DBConnector.getInstances().mssp_InsertTransaction(user,
+						channelName, pkiSim, null, null, responseMess, null);
+				archiveId = createArchiveId(errors,
+						(String) requestContext
+								.get(RequestContext.TRANSACTION_ID));
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			}
+
+		} else if (method.compareTo(Defines.SIGNERAP_STRREG) == 0) {
+			String transCode = getTransactionId(user);
+			// insert mssp transaction
+			DBConnector.getInstances().mssp_InsertTransaction(user,
+					channelName, pkiSim, transCode, null, null, null);
+
+			ResponseCode = Defines.CODE_MSSP_REQUEST_ACCEPTED;
+			ResponseMessage = Defines.MSSP_REQUEST_ACCEPTED.replace(
+					"{transcode}", transCode);
+
+			archiveId = createArchiveId(errors,
+					(String) requestContext.get(RequestContext.TRANSACTION_ID));
+			final Collection<? extends Archivable> archivables = Arrays
+					.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+							CONTENT_TYPE, errors, archiveId));
+			signResponse = new GenericSignResponse(sReq.getRequestID(), errors,
+					null, null, archiveId, archivables, ResponseCode,
+					ResponseMessage, null);
+			return signResponse;
+		} else if (method.compareTo(Defines.SIGNERAP_CERTREG) == 0) {
+			LOG.info("Certificate Request");
+			if (algorithm.compareTo(HASH_SHA1) == 0) {
+				if (data.length != 20) {
+					LOG.error("Data should be hashed. Expected length is 20 bytes");
+					ResponseMessage = Defines.ERROR_NOBASE64FILE;
+					ResponseCode = Defines.CODE_NOBASE64FILE;
+					archiveId = createArchiveId(errors,
+							(String) requestContext
+									.get(RequestContext.TRANSACTION_ID));
+					final Collection<? extends Archivable> archivables = Arrays
+							.asList(new DefaultArchivable(
+									Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+									errors, archiveId));
+					signResponse = new GenericSignResponse(sReq.getRequestID(),
+							errors, null, null, archiveId, archivables,
+							ResponseCode, ResponseMessage, null);
+					return signResponse;
+				} else {
+					try {
+						BouncyCastleProvider provider = new BouncyCastleProvider();
+						Security.addProvider(provider);
+
+						DERObjectIdentifier sha1oid_ = new DERObjectIdentifier(
+								"1.3.14.3.2.26");
+
+						AlgorithmIdentifier sha1aid_ = new AlgorithmIdentifier(
+								sha1oid_, null);
+						DigestInfo di = new DigestInfo(sha1aid_, data);
+
+						byte[] plainSig = di.getEncoded(ASN1Encoding.DER);
+
+						com.tomicalab.cag360.connector.ws.Gateway wsConnector = ConnectorSrv
+								.getInstance().getWS();
+
+						com.tomicalab.cag360.connector.ws.ConnectorData wsRequest = new com.tomicalab.cag360.connector.ws.ConnectorData();
+						wsRequest
+								.setFunctionName(Constant.F_SIM_TOMICAMSSP_SIGREQUEST);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsPhone = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsPhone.setKey(Constant.K_MOBILENO);
+						wsPhone.setValue(pkiSim);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsMessageMode = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsMessageMode.setKey(Constant.K_MESSAGEMODE);
+						wsMessageMode.setValue(messageMode);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsSigFormat = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsSigFormat.setKey(Constant.K_SIGNATUREFORMAT);
+						wsSigFormat.setValue(Defines.SIGNERAP_SIGNFORMAT_P7);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsDataDisplay = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsDataDisplay.setKey(Constant.K_DISPLAYDATA);
+						wsDataDisplay.setValue(displayData);
+
+						com.tomicalab.cag360.connector.ws.MetaData wsApTransId = new com.tomicalab.cag360.connector.ws.MetaData();
+						wsApTransId.setKey(Constant.K_APTRANSID);
+						wsApTransId.setValue(ExtFunc.generateApTransId());
+
+						wsRequest.getSData().add(wsDataDisplay);
+						wsRequest.getSData().add(wsPhone);
+						wsRequest.getSData().add(wsMessageMode);
+						wsRequest.getSData().add(wsApTransId);
+						wsRequest.getSData().add(wsSigFormat);
+						wsRequest.setBData(plainSig);
+
+						ConnectorData wsResponse = wsConnector.call(wsRequest);
+
+						int responseCode = wsResponse.getResponseCode();
+						String responseMess = wsResponse.getResponseMessage();
+						if (responseCode == Defines.CODE_SUCCESS) {
+							String signature = com.tomicalab.cag360.connector.ws.Utils
+									.getMetaDataValue(wsResponse.getSData(),
+											Constant.K_SIGNATURE);
+							String certificate = com.tomicalab.cag360.connector.ws.Utils
+									.getMetaDataValue(wsResponse.getSData(),
+											Constant.K_CERTIFICATE);
+
+							CertificateFactory certFactory = CertificateFactory
+									.getInstance("X.509");
+							InputStream in = new ByteArrayInputStream(
+									DatatypeConverter
+											.parseBase64Binary(certificate));
+							Certificate x509 = certFactory
+									.generateCertificate(in);
+
+							ResponseCode = Defines.CODE_SUCCESS;
+							ResponseMessage = Defines.SUCCESS;
+
+							archiveId = createArchiveId(data,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE,
+											DatatypeConverter
+													.parseBase64Binary(signature),
+											archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(),
+									DatatypeConverter
+											.parseBase64Binary(signature),
+									x509, null, archiveId, archivables,
+									ResponseCode, ResponseMessage);
+							return signResponse;
+						} else {
+							ResponseMessage = Defines.MSSP_ERROR;
+							ResponseCode = Defines.CODE_MSSP_ERROR;
+							archiveId = createArchiveId(errors,
+									(String) requestContext
+											.get(RequestContext.TRANSACTION_ID));
+							final Collection<? extends Archivable> archivables = Arrays
+									.asList(new DefaultArchivable(
+											Archivable.TYPE_RESPONSE,
+											CONTENT_TYPE, errors, archiveId));
+							signResponse = new GenericSignResponse(
+									sReq.getRequestID(), errors, null, null,
+									archiveId, archivables, ResponseCode,
+									ResponseMessage, null);
+							return signResponse;
+						}
+					} catch (Exception e) {
+						LOG.error("Something wrong: " + e.getMessage());
+						e.printStackTrace();
+						ResponseMessage = Defines.ERROR_UNKNOWN;
+						ResponseCode = Defines.CODE_UNKNOWN;
+						archiveId = createArchiveId(errors,
+								(String) requestContext
+										.get(RequestContext.TRANSACTION_ID));
+						final Collection<? extends Archivable> archivables = Arrays
+								.asList(new DefaultArchivable(
+										Archivable.TYPE_RESPONSE, CONTENT_TYPE,
+										errors, archiveId));
+						signResponse = new GenericSignResponse(
+								sReq.getRequestID(), errors, null, null,
+								archiveId, archivables, ResponseCode,
+								ResponseMessage, null);
+						return signResponse;
+					}
+				}
+			} else {
+				ResponseMessage = Defines.ERROR_INVALID_ALGORITHM;
+				ResponseCode = Defines.CODE_INVALID_ALGORITHM;
+				final Collection<? extends Archivable> archivables = Arrays
+						.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+								CONTENT_TYPE, errors, archiveId));
+				signResponse = new GenericSignResponse(sReq.getRequestID(),
+						errors, null, null, archiveId, archivables,
+						ResponseCode, ResponseMessage, null);
+				return signResponse;
+			}
+		} else {
+			LOG.info("Invalid SignerAP Method");
+			ResponseMessage = Defines.ERROR_INVALIDPARAMETER;
+			ResponseCode = Defines.CODE_INVALIDPARAMETER;
+			archiveId = createArchiveId(errors,
+					(String) requestContext.get(RequestContext.TRANSACTION_ID));
+			final Collection<? extends Archivable> archivables = Arrays
+					.asList(new DefaultArchivable(Archivable.TYPE_RESPONSE,
+							CONTENT_TYPE, errors, archiveId));
+			signResponse = new GenericSignResponse(sReq.getRequestID(), errors,
+					null, null, archiveId, archivables, ResponseCode,
+					ResponseMessage, null);
+			return signResponse;
+		}
+	}
+
+	/**
+	 * @see org.signserver.server.BaseProcessable#getStatus()
+	 */
+	@Override
+	public WorkerStatus getStatus(final List<String> additionalFatalErrors) {
+		return validationService.getStatus();
+	}
+
+	@Override
+	protected List<String> getFatalErrors() {
+		final List<String> errors = new LinkedList<String>();
+
+		errors.addAll(super.getFatalErrors());
+		errors.addAll(fatalErrors);
+
+		return errors;
+	}
+
+	private String getTransactionId(String mobileNo) {
+		String epochTime = String.valueOf(System.nanoTime());
+		String transId = "";
+		try {
+			transId = epochTime.substring(epochTime.length() - 6);
+		} catch (Exception e) {
+			LOG.error("Something wrong: " + e.getMessage());
+		}
+		return transId;
+	}
+
+	private String hex2decimal(String s) {
+		String digits = "0123456789ABCDEF";
+		String rv = "";
+		for (int i = 0; i < s.length(); i++) {
+			char c = s.charAt(i);
+			int a = (int) c;
+			rv += String.valueOf(a);
+		}
+		return rv;
+	}
+}

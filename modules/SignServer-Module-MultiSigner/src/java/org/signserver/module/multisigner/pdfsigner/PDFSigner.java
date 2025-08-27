@@ -1,0 +1,2374 @@
+/**
+ * ***********************************************************************
+ *                                                                       *
+ * SignServer: The OpenSource Automated Signing Server * * This software is free
+ * software; you can redistribute it and/or * modify it under the terms of the
+ * GNU Lesser General Public * License as published by the Free Software
+ * Foundation; either * version 2.1 of the License, or any later version. * *
+ * See terms of license at gnu.org. * *
+ * ***********************************************************************
+ */
+package org.signserver.module.multisigner.pdfsigner;
+
+//import com.lowagie.text.*;
+//import com.lowagie.text.pdf.*;
+//import com.lowagie.text.pdf.PdfSigLockDictionary.LockPermissions;
+//import com.lowagie.text.pdf.security.*;
+import com.itextpdf.text.*;
+import com.itextpdf.text.pdf.PdfSigLockDictionary.LockPermissions;
+import com.itextpdf.text.pdf.*;
+import com.itextpdf.text.pdf.security.*;
+import org.signserver.module.multisigner.*;
+
+import java.io.*;
+import java.net.URL;
+import java.security.SecureRandom;
+import java.security.PrivateKey;
+import java.security.SignatureException;
+import java.security.NoSuchAlgorithmException;
+import java.security.MessageDigest;
+import java.security.cert.*;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import javax.xml.bind.DatatypeConverter;
+
+import org.apache.log4j.Logger;
+import org.bouncycastle.asn1.*;
+import org.bouncycastle.asn1.x500.RDN;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x500.style.BCStyle;
+import org.bouncycastle.asn1.x500.style.IETFUtils;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder;
+import org.signserver.common.*;
+import org.signserver.common.util.*;
+import org.signserver.common.RequestMetadata;
+import org.signserver.validationservice.server.ValidationUtils;
+
+/**
+ * A Signer signing PDF files using the IText PDF library.
+ *
+ * Implements a ISigner and have the following properties: REASON = The reason
+ * shown in the PDF signature LOCATION = The location shown in the PDF signature
+ * RECTANGLE = The location of the visible signature field (llx, lly, urx, ury)
+ *
+ * TSA_URL = The URL of the timestamp authority TSA_USERNAME = Account
+ * (username) of the TSA TSA_PASSWORD = Password for TSA
+ *
+ * CERTIFICATION_LEVEL = The level of certification for the document.
+ * NOT_CERTIFIED, FORM_FILLING_AND_ANNOTATIONS, FORM_FILLING or NOT_CERTIFIED
+ * (default: NOT_CERTIFIED).
+ *
+ * REFUSE_DOUBLE_INDIRECT_OBJECTS = True if documents with multiple indirect
+ * objects with the same object number and generation number pair should be
+ * refused. Used to mitigate a collision signature vulnerability described in
+ * http://pdfsig-collision.florz.de/
+ *
+ * REJECT_PERMISSIONS: Comma separated list of permissions for which SignServer
+ * will refuse to sign the document if present. See Permissions for available
+ * permission names.
+ *
+ * @author Tomas Gustavsson
+ * @author Aziz Göktepe
+ * @author Markus Kilås
+ * @version $Id: PDFSigner.java 2966 2012-11-09 10:30:48Z netmackan $
+ */
+public class PDFSigner {
+
+    private static PDFSigner instance = null;
+
+    public static PDFSigner getInstance() {
+        if (instance == null) {
+            instance = new PDFSigner();
+        }
+        return instance;
+    }
+    /**
+     * Logger for this class.
+     */
+    public static final Logger LOG = Logger.getLogger(PDFSigner.class);
+    // private final CSVFileStatisticsCollector cSVFileStatisticsCollector =
+    // CSVFileStatisticsCollector.getInstance(this.getClass().getName(),
+    // "PDF size in bytes");
+    // Configuration Property constants
+    // signature properties
+    public static final String REASONDEFAULT = "";
+    public static final String LOCATIONDEFAULT = "VN";
+    public static final String LOCKED_SIGNATRURE_FIELD_NAME = "Final Signature";
+    public static final float MAXFONTSIZE = 10;
+    public static String EXTERN_FONT = System.getProperty("jboss.server.home.dir") + "/" + "../../../../../file/vuTimes.ttf";
+    public static final String EXTEN_FONT_NAME = "VU Times";
+    // properties that control signature visibility
+    public static final String ADD_VISIBLE_SIGNATURE = "ADD_VISIBLE_SIGNATURE";
+    public static final boolean ADD_VISIBLE_SIGNATURE_DEFAULT = false;
+    public static final String VISIBLE_SIGNATURE_PAGE = "VISIBLE_SIGNATURE_PAGE";
+    public static final String VISIBLE_SIGNATURE_PAGE_DEFAULT = "First";
+    public static final String VISIBLE_SIGNATURE_RECTANGLE = "VISIBLE_SIGNATURE_RECTANGLE";
+    public static final String VISIBLE_SIGNATURE_RECTANGLE_DEFAULT = "400,700,500,800";
+    public static final String VISIBLE_SIGNATURE_CUSTOM_IMAGE_BASE64 = "VISIBLE_SIGNATURE_CUSTOM_IMAGE_BASE64";
+    public static final String VISIBLE_SIGNATURE_FORCE_VALID = "VISIBLE_SIGNATURE_FORCE_VALID";
+    //public static final String SIGNERINFO_SHOW_SIGNERINFO_ONLY = "SIGNERINFO_SHOW_SIGNERINFO_ONLY"; // Deprecated attribute
+    //public static final String SIGNERINFO_SHOW_DATETIME_ONLY = "SIGNERINFO_SHOW_DATETIME_ONLY"; // Deprecated attribute
+    public static final String VISUAL_STATUS = "VISUAL_STATUS"; // OLD: VISIBLE_VALIDATION_SYMBOL
+    public static final String TEXT_COLOR = "TEXT_COLOR"; // OLD: VISIBLE_SIGNATURE_TEXT_COLOR
+    public static final String IMAGE_AND_TEXT = "IMAGE_AND_TEXT"; // OLD: VISIBLE_SIGNATURE_CUSTOM_IMAGE_TEXT
+    public static final String TEXT_DIRECTION = "TEXT_DIRECTION";
+    public static final String TEXT_DIRECTION_LEFTTORIGHT = "LEFTTORIGHT";
+    public static final String TEXT_DIRECTION_RIGHTTOLEFT = "RIGHTTOLEFT";
+    public static final String TEXT_DIRECTION_TOPTOBOTTOM = "TOPTOBOTTOM";
+    public static final String TEXT_DIRECTION_BOTTOMTOTOP = "BOTTOMTOTOP";
+    public static final String TEXT_DIRECTION_OVERLAP = "OVERLAP";
+    // CN
+    public static final String SHOW_SIGNER_INFO = "SHOW_SIGNER_INFO";
+    public static final String SIGNER_INFO_PREFIX = "SIGNER_INFO_PREFIX"; // OLD: SIGNATURE_SIGNERINFO_PREFIX
+    // Date
+    public static final String SHOW_DATETIME = "SHOW_DATETIME";
+    public static final String DATETIME_PREFIX = "DATETIME_PREFIX"; // OLD: SIGNATURE_DATETIME_PREFIX
+    // Reason
+    public static final String SHOW_REASON = "SHOW_REASON";
+    public static final String SIGNREASON_PREFIX = "SIGNREASON_PREFIX"; // OLD: SIGNATURE_SIGNREASON_PREFIX
+    public static final String REASON = "REASON";
+    public static final String TEXT_STATUS_POSITION = "TEXT_STATUS_POSITION";
+    // Location
+    public static final String SHOW_LOCATION = "SHOW_LOCATION";
+    public static final String LOCATION_PREFIX = "LOCATION_PREFIX";
+    public static final String LOCATION = "LOCATION";
+    public static final String VISIBLE_SIGNATURE_CUSTOM_IMAGE_PATH = "VISIBLE_SIGNATURE_CUSTOM_IMAGE_PATH";
+    public static final String VISIBLE_SIGNATURE_CUSTOM_IMAGE_SCALE_TO_RECTANGLE = "VISIBLE_SIGNATURE_CUSTOM_IMAGE_RESIZE_TO_RECTANGLE";
+    public static final boolean VISIBLE_SIGNATURE_CUSTOM_IMAGE_SCALE_TO_RECTANGLE_DEFAULT = true;
+    public static final String CERTIFICATION_LEVEL = "CERTIFICATION_LEVEL";
+    public static final int CERTIFICATION_LEVEL_DEFAULT = PdfSignatureAppearanceEx.NOT_CERTIFIED;
+    // properties that control timestamping of signature
+    public static final String TSA_URL = "TSA_URL";
+    public static final String TSA_USERNAME = "TSA_USERNAME";
+    public static final String TSA_PASSWORD = "TSA_PASSWORD";
+    public static final String TSA_ENABLE = "TSA_ENABLE";
+    public static final String TSA_PROVIDER = "TSA_PROVIDER";
+    // extra properties
+    public static final String EMBED_CRL = "EMBED_CRL";
+    public static final boolean EMBED_CRL_DEFAULT = false;
+    public static final String EMBED_OCSP_RESPONSE = "EMBED_OCSP_RESPONSE";
+    public static final boolean EMBED_OCSP_RESPONSE_DEFAULT = false;
+    /**
+     * Used to mitigate a collision signature vulnerability described in
+     * http://pdfsig-collision.florz.de/
+     */
+    public static final String REFUSE_DOUBLE_INDIRECT_OBJECTS = "REFUSE_DOUBLE_INDIRECT_OBJECTS";
+    // Permissions properties
+    /**
+     * List of permissions for which SignServer will refuse to sign the document
+     * if present. *
+     */
+    public static final String REJECT_PERMISSIONS = "REJECT_PERMISSIONS";
+    /**
+     * List of permissions to set (all other are cleared). *
+     */
+    public static final String SET_PERMISSIONS = "SET_PERMISSIONS";
+    /**
+     * List of permissions to remove (all other existing permissions are left
+     * untouched). *
+     */
+    public static final String REMOVE_PERMISSIONS = "REMOVE_PERMISSIONS";
+    /**
+     * Future property with list of permissions to add). *
+     */
+    // public static final String ADD_PERMISSIONS = "ADD_PERMISSIONS";
+    /**
+     * Password to set as owner password.
+     */
+    public static final String SET_OWNERPASSWORD = "SET_OWNERPASSWORD";
+    // archivetodisk properties
+    public static final String PROPERTY_ARCHIVETODISK = "ARCHIVETODISK";
+    public static final String PROPERTY_ARCHIVETODISK_PATH_BASE = "ARCHIVETODISK_PATH_BASE";
+    public static final String PROPERTY_ARCHIVETODISK_PATH_PATTERN = "ARCHIVETODISK_PATH_PATTERN";
+    public static final String PROPERTY_ARCHIVETODISK_FILENAME_PATTERN = "ARCHIVETODISK_FILENAME_PATTERN";
+    public static final String DEFAULT_ARCHIVETODISK_PATH_PATTERN = "${DATE:yyyy/MM/dd}";
+    public static final String DEFAULT_ARCHIVETODISK_FILENAME_PATTERN = "${WORKERID}-${REQUESTID}-${DATE:HHmmssSSS}.pdf";
+    private static final String ARCHIVETODISK_PATTERN_REGEX =
+            "\\$\\{(.+?)\\}";
+    private static final String CONTENT_TYPE = "application/pdf";
+    private Pattern archivetodiskPattern;
+    /**
+     * Random used for instance when setting a random owner/permissions password
+     */
+    private SecureRandom random = new SecureRandom();
+    private String WORKERNAME = "PDFSigner";
+    private String ResponseMessage = Defines.ERROR_INTERNALSYSTEM;
+    private int ResponseCode = Defines.CODE_INTERNALSYSTEM;
+    private boolean isRetCrlsNull = false;
+    private static final int IMAGE_SCALING_FACTOR = 20; // 20%
+    private static final String DEFAULT_DATETIME_FORMAT = "dd-MM-yyyy HH:mm:ss";
+
+    private PDFSigner() {
+        File f = new File(EXTERN_FONT);
+        if (!f.exists()) {
+            EXTERN_FONT = "C:/CAG360/file/vuTimes.ttf";
+        }
+    }
+
+    public MultiSignerResponse processData(
+            byte[] pdfbytes,
+            PDFSignerParameters params,
+            String password,
+            Properties signaturePro,
+            Collection<Certificate> certs,
+            X509Certificate x509,
+            PrivateKey privKey,
+            String channelName,
+            String user,
+            int trustedhubTransId,
+            String provider) {
+        MultiSignerResponse signResponse = null;
+        byte[] signedbytes = null;
+        try {
+            //signedbytes = addSignatureToPDFDocument(params, pdfbytes, ((password == null)?null:password.getBytes("ISO-8859-1")), _reason, coordinate, pageNo, 0, certs, x509, privKey);
+            String hash = DatatypeConverter.printHexBinary(ExtFunc.hash(pdfbytes, "SHA-1"));
+            String signerInfo = x509.getSubjectDN().toString();
+            
+            LOG.info("Hash: "+hash+" Signed by: "+signerInfo);
+            
+            signedbytes = addSignatureToPDFDocument(params, pdfbytes, ((password == null) ? null : password.getBytes("ISO-8859-1")), signaturePro, 0, certs, x509, privKey, channelName, user, trustedhubTransId, provider);
+            if (signedbytes == null) {
+                signResponse = new MultiSignerResponse(ResponseCode, ResponseMessage);
+            } else {
+                signResponse = new MultiSignerResponse(signedbytes, ResponseCode, ResponseMessage);
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            signResponse = new MultiSignerResponse(Defines.CODE_INTERNALSYSTEM, Defines.ERROR_INTERNALSYSTEM);
+        }
+        return signResponse;
+    }
+
+    /**
+     * Calculates an estimate of the PKCS#7 structure size given the provided
+     * input parameters.
+     *
+     * Questions that we need to answer to construct an formula for calculating
+     * a good enough estimate:
+     *
+     * 1. What are the parameters influencing the PKCS#7 size? - static or
+     * depending on algorithms: PKCS#7 signature size, - Certificates list - CRL
+     * list - OCSP bytes - timestamp response
+     *
+     * 2. How much does the size increase when the size of an certificate
+     * increases? - It appears to be at maximum the same increase in size
+     *
+     * 3. How much does the size increase for each new certificate, not
+     * including the certificate size? - 0. No increase for each certificate
+     * except the actual certificate size
+     *
+     * 4. How much does the size increase when the size of the timestamp
+     * responses increases? - It appears to be at maximum the same increase in
+     * size - However as the response is sent after the signing and possibly
+     * from an external server we can not be sure about what size it will have.
+     * We should use a large enough (but reasonable) value that it is not so
+     * likely that we will have to do a second try.
+     *
+     * 5. How much does the size increase when the size of an CRL increases? -
+     * It appears to be the same increase in size most of the times but in in
+     * one case it got 1 byte larger. - It turns out that the CRLs are included
+     * twice (!)
+     *
+     * 6. How much does the size increase for each new CRL, not including the
+     * CRL size? - 0. No increase for each CRL except the actual CRL size
+     *
+     * 7. What is a typical size of an timestamp response? - That depends mostly
+     * on the included certificate chain
+     *
+     * 8. What value should we use in the initial estimate for the timestamp? -
+     * Currently 4096 is used but with a chain of 4 "normal" certificates that
+     * is a little bit too little. - Lets use 7168 and there are room for about
+     * 6 "normal" certificates
+     *
+     *
+     * See also PDFSignerUnitTest for tests that the answers to the questions
+     * above still holds.
+     *
+     * @param certChain The signing certificate chain
+     * @param tsc Timestamp client, this can be null if no timestamp response is
+     * used. The contribution is estimated by using a fixed value
+     * @param ocsp The OCSP response, can be null
+     * @param crlList The list of CRLs included in the signature, this can be
+     * null
+     *
+     * @return Returns the estimated signature size in bytes
+     */
+    protected int calculateEstimatedSignatureSize(Certificate[] certChain, TSAClient tsc,
+            byte[] ocsp, CRL[] crlList) throws SignServerException {
+        int estimatedSize = 0;
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Calculating estimated signature size");
+        }
+
+        for (Certificate cert : certChain) {
+            try {
+                int certSize = cert.getEncoded().length;
+                estimatedSize += certSize;
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Adding " + certSize + " bytes for certificate");
+                }
+
+            } catch (CertificateEncodingException e) {
+                ResponseCode = Defines.CODE_PDFCERT;
+                ResponseMessage = Defines.ERROR_PDFCERT;
+                return -1;
+                //throw new SignServerException("Error estimating signature size contribution for certificate", e);
+            }
+        }
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Total size of certificate chain: " + estimatedSize);
+        }
+
+        // add estimate for PKCS#7 structure + hash
+        estimatedSize += 2000;
+
+        // add space for OCSP response
+        if (ocsp != null) {
+            estimatedSize += ocsp.length;
+
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Adding " + ocsp.length + " bytes for OCSP response");
+            }
+        }
+
+        if (tsc != null) {
+            // add guess for timestamp response (which we can't really know)
+            // TODO: we might be able to store the size of the last TSA response and re-use next time...
+            final int tscSize = 4096;
+
+            estimatedSize += tscSize;
+
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Adding " + tscSize + " bytes for TSA");
+            }
+        }
+
+        // add estimate for CRL
+        if (crlList != null) {
+            for (CRL crl : crlList) {
+                if (crl instanceof X509CRL) {
+                    X509CRL x509Crl = (X509CRL) crl;
+
+                    try {
+                        int crlSize = x509Crl.getEncoded().length;
+                        // the CRL is included twice in the signature...
+                        estimatedSize += crlSize * 2;
+
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("Adding " + crlSize * 2 + " bytes for CRL");
+                        }
+
+                    } catch (CRLException e) {
+                        ResponseCode = Defines.CODE_PDFCRL;
+                        ResponseMessage = Defines.ERROR_PDFCRL;
+                        return -1;
+                        //throw new SignServerException("Error estimating signature size contribution for CRL", e);
+                    }
+                }
+            }
+            estimatedSize += 100;
+        }
+
+        return estimatedSize;
+    }
+
+    protected byte[] calculateSignature(PdfPKCS7_v4 sgn, int size, MessageDigest messageDigest,
+            Calendar cal, PDFSignerParameters params, Certificate[] certChain, TSAClient tsc, byte[] ocsp,
+            PdfSignatureAppearanceEx sap) throws IOException, DocumentException, SignServerException {
+
+        final HashMap<PdfName, Integer> exc = new HashMap<PdfName, Integer>();
+        exc.put(PdfName.CONTENTS, new Integer(size * 2 + 2));
+        sap.preClose(exc);
+
+
+        InputStream data = sap.getRangeStream();
+
+        byte buf[] = new byte[8192];
+        int n;
+        while ((n = data.read(buf)) > 0) {
+            messageDigest.update(buf, 0, n);
+        }
+        byte hash[] = messageDigest.digest();
+
+
+        byte sh[] = sgn.getAuthenticatedAttributeBytes(hash, cal, ocsp, null, MakeSignature.CryptoStandard.CADES);
+//        byte sh[] = sgn.getAuthenticatedAttributeBytes(hash, ocsp, null, MakeSignature.CryptoStandard.CADES);
+        try {
+            sgn.update(sh, 0, sh.length);
+        } catch (SignatureException e) {
+            ResponseCode = Defines.CODE_PDFCALSIGN;
+            ResponseMessage = Defines.ERROR_PDFCALSIGN;
+            return null;
+            //throw new SignServerException("Error calculating signature", e);
+        }
+
+        byte[] encodedSig = sgn.getEncodedPKCS7(hash, cal, tsc, ocsp, null, MakeSignature.CryptoStandard.CADES);
+//        byte[] encodedSig = sgn.getEncodedPKCS7(hash, tsc, ocsp, null, MakeSignature.CryptoStandard.CADES);
+
+        return encodedSig;
+    }
+
+    protected byte[] addSignatureToPDFDocument(
+            PDFSignerParameters params,
+            byte[] pdfbytes,
+            byte[] password,
+            Properties signaturePro,
+            int contentEstimated,
+            Collection<Certificate> certs,
+            X509Certificate x509,
+            PrivateKey privKey,
+            String channelName,
+            String user,
+            int trustedhubTransId,
+            String provider) throws Exception {
+
+        // signature properties
+        String visibleSignature = signaturePro.getProperty(Defines._VISIBLESIGNATURE);
+        String coordinate = signaturePro.getProperty(Defines._COORDINATE);
+        String pageNo = signaturePro.getProperty(Defines._PAGENO);
+        String signReason = signaturePro.getProperty(Defines._SIGNREASON);
+        String location = signaturePro.getProperty(Defines._LOCATION);
+        String visualStatus = signaturePro.getProperty(Defines._VISUALSTATUS);
+        String signatureImage = signaturePro.getProperty(Defines._SIGNATUREIMAGE);
+        String signerInfoPrefix = signaturePro.getProperty(Defines._SIGNERINFOPREFIX);
+        String dateTimePrefix = signaturePro.getProperty(Defines._DATETIMEPREFIX);
+        String signReasonPrefix = signaturePro.getProperty(Defines._SIGNREASONPREFIX);
+        String locationPrefix = signaturePro.getProperty(Defines._LOCATIONPREFIX);
+        String imageAndText = signaturePro.getProperty(Defines._IMAGEANDTEXT);
+        String texColor = signaturePro.getProperty(Defines._TEXTCOLOR);
+        String textStatusPosition = signaturePro.getProperty(Defines._TEXTSTATUSPOSITION);
+        String textDirection = signaturePro.getProperty(Defines._TEXTDIRECTION);
+        //String showSignerInfoOnly = signaturePro.getProperty(Defines._SHOWDATETIMEONLY);
+        //String showDateTimeOnly = signaturePro.getProperty(Defines._SHOWSIGNERINFOONLY);
+        String showSignerInfo = signaturePro.getProperty(Defines._SHOWSIGNERINFO);
+        String showDateTime = signaturePro.getProperty(Defines._SHOWDATETIME);
+        String showReason = signaturePro.getProperty(Defines._SHOWREASON);
+        String showLocation = signaturePro.getProperty(Defines._SHOWLOCATION);
+        String signingTime = signaturePro.getProperty(Defines._SIGNINGTIME);
+
+        String tsaProvider = signaturePro.getProperty(Defines._TSA_PROVIDER);
+        String hashAlog = signaturePro.getProperty(Defines._ALGORITHM);
+        String lockAfterSign = signaturePro.getProperty(Defines._LOCKAFTERSIGNING);
+        String datetimeFormat = signaturePro.getProperty(Defines._DATETIMEFORMAT);
+
+        if (hashAlog != null) {
+            if (hashAlog.equals(Defines.HASH_SHA1) || hashAlog.equals(Defines.HASH_SHA1_)) {
+                hashAlog = Defines.HASH_SHA1;
+            } else if (hashAlog.equals(Defines.HASH_SHA256) || hashAlog.equals(Defines.HASH_SHA256_)) {
+                hashAlog = Defines.HASH_SHA256;
+            } else if (hashAlog.equals(Defines.HASH_SHA384) || hashAlog.equals(Defines.HASH_SHA384_)) {
+                hashAlog = Defines.HASH_SHA384;
+            } else if (hashAlog.equals(Defines.HASH_SHA512) || hashAlog.equals(Defines.HASH_SHA512_)) {
+                hashAlog = Defines.HASH_SHA512;
+            } else {
+                hashAlog = Defines.HASH_SHA256;
+            }
+        } else {
+            hashAlog = Defines.HASH_SHA256;
+        }
+
+        BaseColor txtColor = BaseColor.BLACK;
+        if (texColor != null) {
+            txtColor = getColor(texColor);
+        } else {
+            if (params.getTextColor() != null) {
+                txtColor = getColor(params.getTextColor());
+            }
+        }
+
+
+        boolean isLockAfterSigning = false;
+        boolean isShowSignature = false;
+        boolean isShowVisualStatus = false;
+        boolean isUseImage = false;
+        boolean isUseImageAndText = false;
+        //boolean isShowSignerInfoOnly = false;
+        //boolean isShowDateTimeOnly = false;
+        boolean isUseTsa = false;
+
+        boolean isShowSignerInfo = true;
+        boolean isShowDateTime = true;
+        boolean isShowReason = true;
+        boolean isShowLocation = false;
+        int signaturePage = 1; // initialzie default value
+        int llx = 0;
+        int lly = 0;
+        int urx = 127;
+        int ury = 42;
+
+
+        if (showSignerInfo != null) {
+            isShowSignerInfo = Boolean.parseBoolean(showSignerInfo);
+        } else {
+            isShowSignerInfo = params.getShowSignerInfo();
+        }
+
+        if (showDateTime != null) {
+            isShowDateTime = Boolean.parseBoolean(showDateTime);
+        } else {
+            isShowDateTime = params.getShowSignDateTime();
+        }
+
+        if (showReason != null) {
+            isShowReason = Boolean.parseBoolean(showReason);
+        } else {
+            isShowReason = params.getShowReason();
+        }
+
+        if (showLocation != null) {
+            isShowLocation = Boolean.parseBoolean(showLocation);
+        } else {
+            isShowLocation = params.getShowLocation();
+        }
+
+
+        // when given a content length (i.e. non-zero), it means we are running a second try
+        boolean secondTry = contentEstimated != 0;
+        Certificate[] certChain = (Certificate[]) certs.toArray(new Certificate[0]);
+        PdfReader reader = new PdfReader(pdfbytes, password);
+        PdfStamperEx stp = null;
+
+        // add visible signature if requested
+        if (visibleSignature != null) {
+            isShowSignature = Boolean.parseBoolean(visibleSignature.trim());
+        } else {
+            isShowSignature = params.isAdd_visible_signature();
+        }
+
+        if (isShowSignature) {
+            // calculate page for placing signature
+            signaturePage = getPageNumberForSignature(reader, params);
+            if (pageNo != null) {
+                if (pageNo.compareTo("") != 0) {
+                    try {
+                        int no = Integer.parseInt(pageNo);
+                        if (no > 0 && no <= reader.getNumberOfPages()) {
+                            signaturePage = no;
+                        }
+                    } catch (NumberFormatException e) {
+                        if (pageNo.equals("First")) {
+                            signaturePage = 1;
+                        } else if (pageNo.equals("Last")) {
+                            signaturePage = reader.getNumberOfPages();
+                        } else {
+                            signaturePage = 1;
+                        }
+                    }
+                }
+            }
+
+            // calculate the rectangle
+            if (coordinate != null) {
+                if (coordinate.compareTo("") != 0) {
+                    String[] toado = coordinate.split(",");
+                    try {
+                        llx = Integer.parseInt(toado[0]);
+                        lly = Integer.parseInt(toado[1]);
+                        urx = Integer.parseInt(toado[2]);
+                        ury = Integer.parseInt(toado[3]);
+                    } catch (NumberFormatException e) {
+                        LOG.error("Error while parsing coordinate. Using default one");
+                        llx = params.getVisible_sig_rectangle_llx();
+                        lly = params.getVisible_sig_rectangle_lly();
+                        urx = params.getVisible_sig_rectangle_urx();
+                        ury = params.getVisible_sig_rectangle_ury();
+                    }
+                }
+            } else {
+                llx = params.getVisible_sig_rectangle_llx();
+                lly = params.getVisible_sig_rectangle_lly();
+                urx = params.getVisible_sig_rectangle_urx();
+                ury = params.getVisible_sig_rectangle_ury();
+            }
+        }
+
+        // lock after signing is only effected once signature is visible
+        if (lockAfterSign != null) {
+            isLockAfterSigning = Boolean.parseBoolean(lockAfterSign.trim());
+        } else {
+            isLockAfterSigning = false;
+        }
+
+        if (isLockAfterSigning && isShowSignature) {
+            LOG.info("Lock this document after signing.");
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            stp = new PdfStamperEx(reader, baos, (char) 0, true);
+            // adding the empty signature field
+            PdfFormField field = PdfFormField.createSignature(stp.getWriter());
+            field.setFieldName(LOCKED_SIGNATRURE_FIELD_NAME);
+            field.put(
+                    PdfName.LOCK,
+                    stp.getWriter().addToBody(new PdfSigLockDictionary(LockPermissions.NO_CHANGES_ALLOWED)).getIndirectReference());
+            field.setFlags(PdfAnnotation.FLAGS_PRINT);
+            field.setPage(signaturePage);
+            field.setWidget(new Rectangle(llx, lly, urx, ury),
+                    PdfAnnotation.HIGHLIGHT_INVERT);
+            stp.addAnnotation(field, signaturePage);
+            // finishing the intermediate PDF
+            stp.close();
+            reader.close();
+            reader = new PdfReader(baos.toByteArray());
+        }
+
+        float[] checkMarkPosition = new float[3];
+
+
+
+
+        // calculate check mark and check text
+        checkMarkPosition[0] = 30;
+        checkMarkPosition[1] = urx - 30;
+        checkMarkPosition[2] = 0;
+
+        float[] checkTextPosition = null;
+        String statusPosition = null;
+        if (textStatusPosition != null) {
+            statusPosition = textStatusPosition;
+        } else {
+            if (params.getTextStatusPosition() != null) {
+                statusPosition = params.getTextStatusPosition();
+            }
+        }
+
+        if (statusPosition != null) {
+            String[] parts = statusPosition.split(",");
+            try {
+                checkTextPosition = new float[4];
+//                checkTextPosition[0] = urx - llx - 100;
+//                checkTextPosition[1] = 0;
+//                checkTextPosition[2] = urx - llx;
+//                checkTextPosition[3] = 20;
+                checkTextPosition[0] = Float.parseFloat(parts[0].trim());
+                checkTextPosition[1] = Float.parseFloat(parts[1].trim());
+                checkTextPosition[2] = Float.parseFloat(parts[2].trim());
+                checkTextPosition[3] = Float.parseFloat(parts[3].trim());
+            } catch (NumberFormatException e) {
+                e.printStackTrace();
+                checkTextPosition = null;
+            }
+        }
+
+
+
+        boolean appendMode = true; // TODO: This could be good to have as a property in the future
+
+        // Don't certify already certified documents
+        if (reader.getCertificationLevel() != PdfSignatureAppearanceEx.NOT_CERTIFIED
+                && params.getCertification_level() != PdfSignatureAppearanceEx.NOT_CERTIFIED) {
+            ResponseCode = Defines.CODE_PDFNOTCERTIFIED;
+            ResponseMessage = Defines.ERROR_PDFNOTCERTIFIED;
+            return null;
+            //throw new IllegalRequestException("Will not certify an already certified document");
+        }
+
+        // Don't sign documents where the certification does not allow it
+        if (reader.getCertificationLevel() == PdfSignatureAppearanceEx.CERTIFIED_NO_CHANGES_ALLOWED
+                || reader.getCertificationLevel() == PdfSignatureAppearanceEx.CERTIFIED_FORM_FILLING) {
+            ResponseCode = Defines.CODE_PDFSIGNALLOW;
+            ResponseMessage = Defines.ERROR_PDFSIGNALLOW;
+            return null;
+        }
+
+        Permissions currentPermissions = Permissions.fromInt((int) reader.getPermissions());
+
+        if (params.getSetPermissions() != null && params.getRemovePermissions() != null) {
+            ResponseCode = Defines.CODE_PDFPERMISSION;
+            ResponseMessage = Defines.ERROR_PDFPERMISSION;
+            return null;
+        }
+
+        Permissions newPermissions;
+        if (params.getSetPermissions() != null) {
+            newPermissions = params.getSetPermissions();
+        } else if (params.getRemovePermissions() != null) {
+            newPermissions = currentPermissions.withRemoved(params.getRemovePermissions());
+        } else {
+            newPermissions = null;
+        }
+
+        Permissions rejectPermissions = Permissions.fromSet(params.getRejectPermissions());
+        byte[] userPassword = reader.computeUserPassword();
+        int cryptoMode = reader.getCryptoMode();
+        if (LOG.isDebugEnabled()) {
+            StringBuilder buff = new StringBuilder();
+            buff.append("Current permissions: ").append(currentPermissions).append("\n").append("Remove permissions: ").append(params.getRemovePermissions()).append("\n").append("Reject permissions: ").append(rejectPermissions).append("\n").append("New permissions: ").append(newPermissions).append("\n").append("userPassword: ").append(userPassword == null ? "null" : "yes").append("\n").append("ownerPassword: ").append(password == null ? "no" : (isUserPassword(reader, password) ? "no" : "yes")).append("\n").append("setOwnerPassword: ").append(params.getSetOwnerPassword() == null ? "no" : "yes").append("\n").append("cryptoMode: ").append(cryptoMode);
+            LOG.debug(buff.toString());
+        }
+
+        if (appendMode && (newPermissions != null || params.getSetOwnerPassword() != null)) {
+            appendMode = false;
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Changing appendMode to false to be able to change permissions");
+            }
+        }
+
+        ByteArrayOutputStream fout = new ByteArrayOutputStream();
+        stp = PdfStamperEx.createSignature(reader, fout, '\0', null, appendMode);
+
+        PdfSignatureAppearanceEx sap = stp.getSignatureAppearance();
+
+        // Set the new permissions
+        if (newPermissions != null || params.getSetOwnerPassword() != null) {
+            if (cryptoMode < 0) {
+                cryptoMode = PdfWriter.STANDARD_ENCRYPTION_128;
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Setting default encryption algorithm");
+                }
+            }
+            if (newPermissions == null) {
+                newPermissions = currentPermissions;
+            }
+            if (params.getSetOwnerPassword() != null) {
+                password = params.getSetOwnerPassword().getBytes("ISO-8859-1");
+            } else if (isUserPassword(reader, password)) {
+                // We do not have an owner password so lets use a random one
+                password = new byte[16];
+                random.nextBytes(password);
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Setting random owner password");
+                }
+            }
+            stp.setEncryption(userPassword, password, newPermissions.asInt(), cryptoMode);
+            currentPermissions = newPermissions;
+        }
+
+        // Reject if any permissions are rejected and the document does not use a permission password
+        // or if it contains any of the rejected permissions
+        if (rejectPermissions.asInt() != 0) {
+            if (cryptoMode < 0 || currentPermissions.containsAnyOf(rejectPermissions)) {
+                ResponseCode = Defines.CODE_PDFPERMISSION;
+                ResponseMessage = Defines.ERROR_PDFPERMISSION;
+                return null;
+                //throw new IllegalRequestException("Document contains permissions not allowed by this signer");
+            }
+        }
+
+        // include signer certificate crl inside cms package if requested
+        CRL[] crlList = null;
+        if (params.isEmbed_crl()) {
+            crlList = getCrlsForChain(certs);
+            if (crlList == null && isRetCrlsNull) {
+                return null;
+            }
+        }
+        //sap.setCrypto(null, certChain, crlList, PdfSignatureAppearanceEx.SELF_SIGNED);
+        //reason
+        boolean isReasonDefault = false;
+        if (signReason == null) {
+            signReason = params.getReason();
+        } else if (signReason.compareTo("") == 0) {
+            signReason = params.getReason();
+        } else {
+            isReasonDefault = true;
+        }
+
+        // Date signing
+        Calendar cal = Calendar.getInstance();
+        if (signingTime != null) {
+            try {
+                // yyyy-MM-dd hh:mm:ss (2001-07-04 12:08:56)
+                SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd hh:mm:ss");
+                cal.setTime(sdf.parse(signingTime));
+            } catch (ParseException e) {
+                LOG.error("Invalid datetime format.");
+            }
+        }
+
+        // add visible signature if requested
+        if (visibleSignature != null) {
+            isShowSignature = Boolean.parseBoolean(visibleSignature.trim());
+        } else {
+            isShowSignature = params.isAdd_visible_signature();
+        }
+        if (isShowSignature) {
+
+            Rectangle rectangle = new Rectangle(llx, lly, urx, ury);
+            if (isLockAfterSigning) {
+                sap.setVisibleSignature(LOCKED_SIGNATRURE_FIELD_NAME);
+            } else {
+                sap.setVisibleSignature(rectangle, signaturePage, null);
+            }
+
+            // set custom image if requested
+            if (visualStatus != null) {
+                isShowVisualStatus = Boolean.parseBoolean(visualStatus.trim());
+            } else {
+                isShowVisualStatus = params.isUse_validation_symbol();
+            }
+
+            if (signatureImage != null) {
+                isUseImage = true;
+            } else {
+                isUseImage = params.isUse_custom_image();
+            }
+
+            if (imageAndText != null) {
+                isUseImageAndText = Boolean.parseBoolean(imageAndText);
+            } else {
+                isUseImageAndText = params.isUse_custom_image_text();
+            }
+
+            if (location == null) {
+                if (params.getLocation() != null) {
+                    location = params.getLocation();
+                } else {
+                    location = "";
+                }
+            }
+
+            if (isUseImage) {
+                Image img = null;
+                if (signatureImage != null) {
+                    img = params.getCustom_image(signatureImage, llx, lly, urx, ury);
+                } else {
+                    img = params.getCustom_image();
+                }
+                if (isUseImageAndText) {
+                    // Visual Status
+                    if (!isShowVisualStatus) {
+//                        sap.setAcro6Layers(true);
+                        sap.setEnableLayer1(false, null);//checkMarkPosition
+                        sap.setEnableLayer4(false, checkTextPosition);//checkTextPosition
+                    } else {
+//                        sap.setAcro6Layers(false);
+                        sap.setEnableLayer1(true, null);
+                        sap.setEnableLayer4(true, checkTextPosition);
+                    }
+
+                    if (textDirection == null) {
+                        textDirection = params.getTextDirection();
+                    } else {
+                        textDirection = getTextDirection(textDirection);
+                    }
+
+                    boolean forceValid = params.isUse_force_valid();
+
+                    if (textDirection.compareTo(TEXT_DIRECTION_LEFTTORIGHT) == 0) {
+                        // LEFT TO RIGTH
+                        PdfTemplate n2 = sap.getLayer(2);
+                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                        if (img.getScaledWidth() > rectangle.getWidth() / 3) {
+                            img.scaleToFit(rectangle.getWidth() / 3, rectangle.getHeight());
+                        }
+                        img.setAbsolutePosition(rectangle.getWidth() - img.getScaledWidth(), rectangle.getHeight() - img.getScaledHeight());
+
+
+                        // FIRST BLOCK TEXT
+                        PdfPCell textCell = new PdfPCell();
+                        textCell.setBorder(Rectangle.NO_BORDER);
+                        textCell.setNoWrap(false);
+                        textCell.setVerticalAlignment(Element.ALIGN_TOP);
+                        textCell.setHorizontalAlignment(Element.ALIGN_RIGHT);
+                        textCell.setFixedHeight(rectangle.getHeight());
+
+                        String text = "\n\n\n";
+                        // Add CN
+                        if (isShowSignerInfo) {
+                            // extract commom name
+                            X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                            RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                            String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                            if (signerInfoPrefix == null) {
+                                signerInfoPrefix = params.getSignerInfoPrefix();
+                                if (signerInfoPrefix == null) {
+                                    // no prefix
+                                    text += commonName;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signerInfoPrefix + " " + commonName;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signerInfoPrefix + " " + commonName;
+                                text += "\n";
+                            }
+                        }
+
+                        // Add Datetime
+                        if (isShowDateTime) {
+                            //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                            //String signDateTime = formatter.format(cal.getTime());
+                            String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                            if (dateTimePrefix == null) {
+                                dateTimePrefix = params.getDateTimePrefix();
+                                if (dateTimePrefix == null) {
+                                    // no prefix
+                                    text += signDateTime;
+                                    text += "\n";
+                                } else {
+                                    //prefix used
+                                    text += dateTimePrefix + " " + signDateTime;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += dateTimePrefix + " " + signDateTime;
+                                text += "\n";
+                            }
+                        }
+                        // Add Reason
+                        if (isShowReason) {
+                            if (signReasonPrefix == null) {
+                                signReasonPrefix = params.getSignReasonPrefix();
+                                if (signReasonPrefix == null) {
+                                    // no prefix
+                                    text += signReason;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signReasonPrefix + " " + signReason;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signReasonPrefix + " " + signReason;
+                                text += "\n";
+                            }
+                        }
+                        // Add location
+                        if (isShowLocation) {
+                            if (locationPrefix == null) {
+                                locationPrefix = params.getLocationPrefix();
+                                if (locationPrefix == null) {
+                                    // no prefix
+                                    text += location;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += locationPrefix + " " + location;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += locationPrefix + " " + location;
+                                //text += "\n"; # no need to break the line
+                            }
+                        }
+
+                        BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                        Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+                        float finalFontSize = fitText(textFont, text, new Rectangle(rectangle.getLeft(), rectangle.getBottom(), rectangle.getRight() - img.getScaledWidth(), rectangle.getTop()), MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+                        //LOG.info("Text size : " + finalFontSize);
+//                        Paragraph p = new Paragraph();
+//                        p.add(new Phrase(new Chunk(text, textFont)));
+//                        p.setAlignment(Element.ALIGN_RIGHT);
+//                        p.setSpacingAfter(0);
+//                        p.setSpacingAfter(0);
+//                        p.setLeading(finalFontSize);
+//
+//                        textCell.addElement(p);
+
+                        //Scale the image fit in template and set position
+
+
+//                        PdfTemplate n21 = n2.createTemplate( rectangle.getWidth() - img.getScaledWidth()  , rectangle.getHeight() );
+//                        PdfTemplate n22 = n2.createTemplate( img.getScaledWidth()  , rectangle.getHeight());
+
+//                        PdfPTable sigTableText = new PdfPTable(1);
+//                        sigTableText.setSpacingAfter(0);
+//                        sigTableText.setSpacingBefore(0);
+//                        sigTableText.setWidthPercentage(100);
+//                        sigTableText.setTotalWidth( n21.getWidth() );
+//                        sigTableText.setLockedWidth(true);
+//                        sigTableText.addCell( textCell );
+//                        sigTableText.writeSelectedRows( 0, -1, 0, sigTableText.getTotalHeight(), n21);
+
+                        n2.addImage(img);
+                        ColumnText ct = new ColumnText(n2);
+                        Phrase ph = new Phrase(text, new Font(bf, finalFontSize, Font.NORMAL, txtColor));
+                        ct.setSimpleColumn(ph,
+                                0,
+                                0,
+                                rectangle.getWidth() - img.getScaledWidth(),
+                                rectangle.getHeight(),
+                                finalFontSize,
+                                Element.ALIGN_RIGHT);
+                        ct.go();
+
+
+//                        n2.addTemplate(n21, 0, 0);
+//                        n2.addTemplate(n22, rectangle.getWidth() - img.getScaledWidth() , 0);
+
+                    } else if (textDirection.compareTo(TEXT_DIRECTION_RIGHTTOLEFT) == 0) {
+                        // RIGHT TO LEFT
+                        PdfTemplate n2 = sap.getLayer(2);
+
+
+                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                        if (img.getScaledWidth() > rectangle.getWidth() / 3) {
+                            img.scaleToFit(rectangle.getWidth() / 3, rectangle.getHeight());
+                        }
+                        img.setAbsolutePosition(0, (rectangle.getHeight() - img.getScaledHeight()));
+
+
+                        // SECOND BLOCK
+                        PdfPCell textCell = new PdfPCell();
+                        textCell.setBorder(Rectangle.NO_BORDER);
+                        textCell.setNoWrap(false);
+                        textCell.setVerticalAlignment(Element.ALIGN_TOP);
+                        textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+                        textCell.setFixedHeight(rectangle.getHeight());
+
+                        String text = "\n\n\n";
+                        // Add CN
+                        if (isShowSignerInfo) {
+                            // extract commom name
+                            X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                            RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                            String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                            if (signerInfoPrefix == null) {
+                                signerInfoPrefix = params.getSignerInfoPrefix();
+                                if (signerInfoPrefix == null) {
+                                    // no prefix
+                                    text += commonName;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signerInfoPrefix + " " + commonName;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signerInfoPrefix + " " + commonName;
+                                text += "\n";
+                            }
+                        }
+
+                        // Add Datetime
+                        if (isShowDateTime) {
+                            //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                            //String signDateTime = formatter.format(cal.getTime());
+                            String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                            if (dateTimePrefix == null) {
+                                dateTimePrefix = params.getDateTimePrefix();
+                                if (dateTimePrefix == null) {
+                                    // no prefix
+                                    text += signDateTime;
+                                    text += "\n";
+                                } else {
+                                    //prefix used
+                                    text += dateTimePrefix + " " + signDateTime;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += dateTimePrefix + " " + signDateTime;
+                                text += "\n";
+                            }
+                        }
+                        // Add Reason
+                        if (isShowReason) {
+                            if (signReasonPrefix == null) {
+                                signReasonPrefix = params.getSignReasonPrefix();
+                                if (signReasonPrefix == null) {
+                                    // no prefix
+                                    text += signReason;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signReasonPrefix + " " + signReason;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signReasonPrefix + " " + signReason;
+                                text += "\n";
+                            }
+                        }
+                        // Add location
+                        if (isShowLocation) {
+                            if (locationPrefix == null) {
+                                locationPrefix = params.getLocationPrefix();
+                                if (locationPrefix == null) {
+                                    // no prefix
+                                    text += location;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += locationPrefix + " " + location;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += locationPrefix + " " + location;
+                                //text += "\n"; # no need to break the line
+                            }
+                        }
+                        BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                        Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+                        float finalFontSize = fitText(textFont, text, new Rectangle(rectangle.getLeft(), rectangle.getBottom(), rectangle.getRight() - img.getScaledWidth(), rectangle.getTop()), MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+//
+//                        Paragraph p = new Paragraph();
+//                        p.add(new Phrase(new Chunk(text, textFont)));
+//                        p.setAlignment(Element.ALIGN_LEFT);
+//                        p.setSpacingAfter(0);
+//                        p.setSpacingAfter(0);
+//                        p.setLeading(finalFontSize);
+//
+//                        textCell.addElement(p);
+
+
+//                        PdfPTable sigTableText = new PdfPTable(1);
+//                        sigTableText.setSpacingAfter(0);
+//                        sigTableText.setSpacingBefore(0);
+//                        sigTableText.setWidthPercentage(100 );
+//                        sigTableText.setTotalWidth( n2.getWidth() - img.getScaledWidth() );
+//                        sigTableText.setLockedWidth(true);
+//                        sigTableText.addCell( textCell );
+                        //sigTableText.writeSelectedRows( 0, -1, rectangle.getWidth() - img.getScaledWidth() , sigTableText.getTotalHeight(), n2 );
+
+                        n2.addImage(img);
+                        ColumnText ct = new ColumnText(n2);
+                        Phrase ph = new Phrase(text, new Font(bf, finalFontSize, Font.NORMAL, txtColor));
+                        ct.setSimpleColumn(ph,
+                                img.getScaledWidth(),
+                                0,
+                                rectangle.getWidth(),
+                                rectangle.getHeight(),
+                                finalFontSize,
+                                Element.ALIGN_LEFT);
+                        ct.go();
+
+                    } else if (textDirection.compareTo(TEXT_DIRECTION_TOPTOBOTTOM) == 0) {
+                        // TOP TO BOTTOM
+                        PdfTemplate n2 = sap.getLayer(2);
+
+                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                        if (img.getScaledHeight() > rectangle.getHeight() / 2) {
+                            img.scaleToFit(rectangle.getWidth(), rectangle.getHeight() / 2);
+                        }
+                        img.setAbsolutePosition((rectangle.getWidth() - img.getScaledWidth()) / 2, 0);
+
+                        // FIRST BLOCK TEXT
+                        PdfPCell textCell = new PdfPCell();
+                        textCell.setBorder(Rectangle.NO_BORDER);
+                        textCell.setNoWrap(false);
+                        textCell.setVerticalAlignment(Element.ALIGN_TOP);
+                        textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+                        textCell.setFixedHeight(rectangle.getHeight() - img.getScaledHeight());
+
+                        String text = "\n\n\n";
+                        // Add CN
+                        if (isShowSignerInfo) {
+                            // extract commom name
+                            X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                            RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                            String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                            if (signerInfoPrefix == null) {
+                                signerInfoPrefix = params.getSignerInfoPrefix();
+                                if (signerInfoPrefix == null) {
+                                    // no prefix
+                                    text += commonName;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signerInfoPrefix + " " + commonName;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signerInfoPrefix + " " + commonName;
+                                text += "\n";
+                            }
+                        }
+
+                        // Add Datetime
+                        if (isShowDateTime) {
+                            //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                            //String signDateTime = formatter.format(cal.getTime());
+                            String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                            if (dateTimePrefix == null) {
+                                dateTimePrefix = params.getDateTimePrefix();
+                                if (dateTimePrefix == null) {
+                                    // no prefix
+                                    text += signDateTime;
+                                    text += "\n";
+                                } else {
+                                    //prefix used
+                                    text += dateTimePrefix + " " + signDateTime;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += dateTimePrefix + " " + signDateTime;
+                                text += "\n";
+                            }
+                        }
+                        // Add Reason
+                        if (isShowReason) {
+                            if (signReasonPrefix == null) {
+                                signReasonPrefix = params.getSignReasonPrefix();
+                                if (signReasonPrefix == null) {
+                                    // no prefix
+                                    text += signReason;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signReasonPrefix + " " + signReason;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signReasonPrefix + " " + signReason;
+                                text += "\n";
+                            }
+                        }
+                        // Add location
+                        if (isShowLocation) {
+                            if (locationPrefix == null) {
+                                locationPrefix = params.getLocationPrefix();
+                                if (locationPrefix == null) {
+                                    // no prefix
+                                    text += location;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += locationPrefix + " " + location;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += locationPrefix + " " + location;
+                                //text += "\n"; # no need to break the line
+                            }
+                        }
+                        BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                        Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+
+                        float finalFontSize = fitText(textFont, text, new Rectangle(rectangle.getLeft(), rectangle.getBottom(), rectangle.getRight(), rectangle.getTop() - img.getScaledHeight()), MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+
+//                        Paragraph p = new Paragraph();
+//                        p.add(new Phrase(new Chunk(text, textFont)));
+//                        p.setAlignment(Element.ALIGN_LEFT);
+//                        p.setSpacingAfter(0);
+//                        p.setSpacingAfter(0);
+//                        p.setLeading(finalFontSize);
+//
+//                        textCell.addElement(p);
+//                        sigTable.addCell(textCell);
+
+//                        PdfPTable sigTableText = new PdfPTable(1);
+//                        sigTableText.setSpacingAfter(0);
+//                        sigTableText.setSpacingBefore(0);
+//                        sigTableText.setWidthPercentage(100 );
+//                        sigTableText.setTotalWidth( n2.getWidth() );
+//                        sigTableText.setLockedWidth(true);
+//                        sigTableText.addCell( textCell );
+//                        sigTableText.writeSelectedRows( 0, -1, 0 , rectangle.getHeight(), n2 );
+
+                        n2.addImage(img);
+                        ColumnText ct = new ColumnText(n2);
+                        Phrase ph = new Phrase(text, new Font(bf, finalFontSize, Font.NORMAL, txtColor));
+                        ct.setSimpleColumn(ph,
+                                0,
+                                rectangle.getHeight() - img.getScaledHeight(),
+                                rectangle.getWidth(),
+                                rectangle.getHeight(),
+                                finalFontSize,
+                                Element.ALIGN_JUSTIFIED);
+                        ct.go();
+
+                        // SECOND BLOCK IMG
+//                        img.setAbsolutePosition(0, 0);
+//                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+//                        img.scalePercent(IMAGE_SCALING_FACTOR);
+
+//                        PdfPCell subImgCell = new PdfPCell(img, true);
+//                        subImgCell.setBorder(Rectangle.NO_BORDER);
+//                        subImgCell.setNoWrap(false);
+//                        subImgCell.setVerticalAlignment(Element.ALIGN_TOP);
+//                        subImgCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+//                        sigSubTable.addCell(subImgCell);
+//
+//                        PdfPCell imgCell = new PdfPCell(sigSubTable);
+//                        imgCell.setBorder(Rectangle.NO_BORDER);
+
+
+
+//                        sigTable.addCell(imgCell);
+//                        ct.addElement(sigTable);
+//                         PdfContentByte canvas = n2.getDuplicate();
+//                        PdfTemplate template = canvas.createTemplate(
+//                        sigTable.getTotalWidth(), sigTable.getTotalHeight());
+//                        sigTable.writeSelectedRows(0, -1, 0, sigTable.getTotalHeight(), template);
+//                        Image img2 = Image.getInstance(template);
+//                        img2.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                        //img2.setAbsolutePosition(0, 0);
+//                        img2.setAbsolutePosition( (rectangle.getWidth() - img2.getScaledWidth() )/2  , (rectangle.getHeight() - img2.getScaledHeight() ) /2 );
+//                        n2.addImage(img2);
+//                        ct.addElement(img2);
+//                        ct.go();
+
+
+                    } else if (textDirection.compareTo(TEXT_DIRECTION_BOTTOMTOTOP) == 0) {
+                        // BOTTOM TO TOP
+                        PdfTemplate n2 = sap.getLayer(2);
+
+//                        ColumnText ct = new ColumnText(n2);
+//                        ct.setSimpleColumn(
+//                                n2.getBoundingBox().getLeft(),
+//                                n2.getBoundingBox().getBottom(),
+//                                n2.getBoundingBox().getRight(),
+//                                n2.getBoundingBox().getTop());
+//
+//                        ct.setExtraParagraphSpace(0);
+//                        ct.setLeading(0);
+
+                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                        if (img.getScaledHeight() > rectangle.getHeight() / 2) {
+                            img.scaleToFit(rectangle.getWidth(), rectangle.getHeight() / 2);
+                        }
+                        img.setAbsolutePosition((rectangle.getWidth() - img.getScaledWidth()) / 2, rectangle.getHeight() - img.getScaledHeight());
+
+//                        PdfPTable sigTable = new PdfPTable(1);
+//                        sigTable.setSpacingAfter(0);
+//                        sigTable.setSpacingBefore(0);
+//                        sigTable.setWidthPercentage(100);
+//                        sigTable.setWidths(new int[]{1});
+//                        sigTable.setTotalWidth(rectangle.getWidth());
+//                        sigTable.setLockedWidth(true);
+
+                        // SECOND BLOCK IMG
+//                        PdfPTable sigSubTable = new PdfPTable(1);
+//                        sigSubTable.setSpacingAfter(0);
+//                        sigSubTable.setSpacingBefore(0);
+
+//                        img.setAbsolutePosition(0, 0);
+//                        img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+//                        img.scalePercent(IMAGE_SCALING_FACTOR);
+
+//                        PdfPCell subImgCell = new PdfPCell(img, true);
+//                        subImgCell.setBorder(Rectangle.NO_BORDER);
+//                        subImgCell.setNoWrap(false);
+//                        subImgCell.setVerticalAlignment(Element.ALIGN_TOP);
+//                        subImgCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+
+//                        sigSubTable.addCell(subImgCell);
+
+//                        PdfPCell imgCell = new PdfPCell(sigSubTable);
+//                        imgCell.setBorder(Rectangle.NO_BORDER);
+//
+//                        sigTable.addCell(imgCell);
+
+                        // FIRST BLOCK TEXT
+                        PdfPCell textCell = new PdfPCell();
+                        textCell.setBorder(Rectangle.NO_BORDER);
+                        textCell.setNoWrap(false);
+                        textCell.setVerticalAlignment(Element.ALIGN_TOP);
+                        textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+                        textCell.setFixedHeight(rectangle.getHeight() - img.getScaledHeight());
+
+                        String text = "\n\n\n";
+                        // Add CN
+                        if (isShowSignerInfo) {
+                            // extract commom name
+                            X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                            RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                            String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                            if (signerInfoPrefix == null) {
+                                signerInfoPrefix = params.getSignerInfoPrefix();
+                                if (signerInfoPrefix == null) {
+                                    // no prefix
+                                    text += commonName;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signerInfoPrefix + " " + commonName;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signerInfoPrefix + " " + commonName;
+                                text += "\n";
+                            }
+                        }
+
+                        // Add Datetime
+                        if (isShowDateTime) {
+                            //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                            //String signDateTime = formatter.format(cal.getTime());
+                            String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                            if (dateTimePrefix == null) {
+                                dateTimePrefix = params.getDateTimePrefix();
+                                if (dateTimePrefix == null) {
+                                    // no prefix
+                                    text += signDateTime;
+                                    text += "\n";
+                                } else {
+                                    //prefix used
+                                    text += dateTimePrefix + " " + signDateTime;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += dateTimePrefix + " " + signDateTime;
+                                text += "\n";
+                            }
+                        }
+                        // Add Reason
+                        if (isShowReason) {
+                            if (signReasonPrefix == null) {
+                                signReasonPrefix = params.getSignReasonPrefix();
+                                if (signReasonPrefix == null) {
+                                    // no prefix
+                                    text += signReason;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signReasonPrefix + " " + signReason;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signReasonPrefix + " " + signReason;
+                                text += "\n";
+                            }
+                        }
+                        // Add location
+                        if (isShowLocation) {
+                            if (locationPrefix == null) {
+                                locationPrefix = params.getLocationPrefix();
+                                if (locationPrefix == null) {
+                                    // no prefix
+                                    text += location;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += locationPrefix + " " + location;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += locationPrefix + " " + location;
+                                //text += "\n"; # no need to break the line
+                            }
+                        }
+                        BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                        Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+
+                        float finalFontSize = fitText(textFont, text, new Rectangle(rectangle.getLeft(), rectangle.getBottom(), rectangle.getRight(), rectangle.getTop() - img.getScaledHeight()), MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+
+//                        Paragraph p = new Paragraph();
+//                        p.add(new Phrase(new Chunk(text, textFont)));
+//                        p.setAlignment(Element.ALIGN_LEFT);
+//                        p.setSpacingAfter(0);
+//                        p.setSpacingAfter(0);
+//                        p.setLeading(finalFontSize);
+//
+//                        textCell.addElement(p);
+////                        sigTable.addCell(textCell);
+//                        PdfPTable sigTableText = new PdfPTable(1);
+//                        sigTableText.setSpacingAfter(0);
+//                        sigTableText.setSpacingBefore(0);
+//                        sigTableText.setWidthPercentage(100 );
+//                        sigTableText.setTotalWidth( n2.getWidth() );
+//                        sigTableText.setLockedWidth(true);
+//                        sigTableText.addCell( textCell );
+//                        sigTableText.writeSelectedRows( 0, -1, 0 , rectangle.getHeight() - img.getScaledHeight() , n2 );
+
+                        n2.addImage(img);
+                        ColumnText ct = new ColumnText(n2);
+                        Phrase ph = new Phrase(text, new Font(bf, finalFontSize, Font.NORMAL, txtColor));
+                        ct.setSimpleColumn(ph,
+                                0,
+                                0,
+                                rectangle.getWidth(),
+                                rectangle.getHeight() - img.getScaledHeight(),
+                                finalFontSize,
+                                Element.ALIGN_JUSTIFIED);
+                        ct.go();
+
+                        //ct.addElement(sigTable);
+//                        
+//                         PdfContentByte canvas = n2.getDuplicate();
+//                        PdfTemplate template = canvas.createTemplate(
+//                                sigTable.getTotalWidth(), sigTable.getTotalHeight());
+//                        sigTable.writeSelectedRows(0, -1, 0, sigTable.getTotalHeight(), template);
+//                        Image img2 = Image.getInstance(template);
+//                        img2.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+//                        //img2.setAbsolutePosition(0, 0);
+//                        img2.setAbsolutePosition( (rectangle.getWidth() - img2.getScaledWidth() )/2  , (rectangle.getHeight() - img2.getScaledHeight() ) /2 );
+//                        n2.addImage(img2);
+
+
+
+
+//                        ct.addElement(img2);
+//                        ct.go();
+                    } else {
+                        // OVERLAP
+
+                        PdfTemplate n2 = sap.getLayer(2);
+                        ColumnText ct = new ColumnText(n2);
+                        ct.setSimpleColumn(
+                                n2.getBoundingBox().getLeft(),
+                                n2.getBoundingBox().getBottom(),
+                                n2.getBoundingBox().getRight(),
+                                n2.getBoundingBox().getTop());
+
+                        ct.setExtraParagraphSpace(0);
+                        ct.setLeading(0);
+
+                        PdfPTable sigTable = new PdfPTable(1);
+                        sigTable.setSpacingAfter(0);
+                        sigTable.setSpacingBefore(0);
+                        sigTable.setWidthPercentage(100);
+                        sigTable.setWidths(new int[]{1});
+
+                        // FIRST BLOCK TEXT
+                        PdfPCell textCell = new PdfPCell();
+                        /*
+                         * textCell.setBorder(Rectangle.NO_BORDER);
+                         * textCell.setNoWrap(false);
+                         * textCell.setVerticalAlignment(Element.ALIGN_MIDDLE);
+                         * textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+                         * textCell.setBorder(Rectangle.BOX);
+                         */
+                        textCell.setBorder(PdfPCell.NO_BORDER);
+                        textCell.setNoWrap(false);
+                        textCell.setUseBorderPadding(true);
+                        textCell.setVerticalAlignment(Element.ALIGN_MIDDLE);
+                        textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+                        textCell.setFixedHeight(rectangle.getHeight());
+                        textCell.setCellEvent(new ImageBackgroundEvent(img));
+
+                        String text = "\n\n\n";
+
+                        if (forceValid) {
+                            text += "Signature valid\n";
+                        }
+
+                        // Add CN
+                        if (isShowSignerInfo) {
+                            // extract commom name
+                            X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                            RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                            String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                            if (signerInfoPrefix == null) {
+                                signerInfoPrefix = params.getSignerInfoPrefix();
+                                if (signerInfoPrefix == null) {
+                                    // no prefix
+                                    text += commonName;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signerInfoPrefix + " " + commonName;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signerInfoPrefix + " " + commonName;
+                                text += "\n";
+                            }
+                        }
+
+                        // Add Datetime
+                        if (isShowDateTime) {
+                            //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                            //String signDateTime = formatter.format(cal.getTime());
+                            String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                            if (dateTimePrefix == null) {
+                                dateTimePrefix = params.getDateTimePrefix();
+                                if (dateTimePrefix == null) {
+                                    // no prefix
+                                    text += signDateTime;
+                                    text += "\n";
+                                } else {
+                                    //prefix used
+                                    text += dateTimePrefix + " " + signDateTime;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += dateTimePrefix + " " + signDateTime;
+                                text += "\n";
+                            }
+                        }
+                        // Add Reason
+                        if (isShowReason) {
+                            if (signReasonPrefix == null) {
+                                signReasonPrefix = params.getSignReasonPrefix();
+                                if (signReasonPrefix == null) {
+                                    // no prefix
+                                    text += signReason;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += signReasonPrefix + " " + signReason;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += signReasonPrefix + " " + signReason;
+                                text += "\n";
+                            }
+                        }
+                        // Add location
+                        if (isShowLocation) {
+                            if (locationPrefix == null) {
+                                locationPrefix = params.getLocationPrefix();
+                                if (locationPrefix == null) {
+                                    // no prefix
+                                    text += location;
+                                    text += "\n";
+                                } else {
+                                    // prefix used
+                                    text += locationPrefix + " " + location;
+                                    text += "\n";
+                                }
+                            } else {
+                                // prefix used
+                                text += locationPrefix + " " + location;
+                                //text += "\n"; # no need to break the line
+                            }
+                        }
+
+                        BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                        Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+
+                        float finalFontSize = fitText(textFont, text, rectangle, MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+
+                        Paragraph p = new Paragraph();
+                        p.add(new Phrase(new Chunk(text, textFont)));
+                        p.setAlignment(Element.ALIGN_LEFT);
+                        p.setSpacingAfter(0);
+                        p.setSpacingAfter(0);
+                        p.setLeading(finalFontSize);
+                        textCell.addElement(p);
+                        sigTable.addCell(textCell);
+
+                        // add table sig
+                        ct.addElement(sigTable);
+                        ct.go();
+                        /*
+                         * // IMAGE img.scaleToFit(rectangle.getWidth(),
+                         * rectangle.getHeight()); img.setAbsolutePosition(
+                         * rectangle.getWidth() - img.getScaledWidth(),
+                         * rectangle.getHeight() - img.getScaledHeight());
+                         * img.setAlignment(Image.ALIGN_MIDDLE);
+                         * sap.getLayer(0).addImage(img);
+                         */
+                    }
+                } else {
+                    // Image only
+                    if (!isShowVisualStatus) {
+//                        sap.setAcro6Layers(true);
+                        sap.setEnableLayer1(false, null); //checkMarkPosition
+                        sap.setEnableLayer4(false, checkTextPosition); //checkTextPosition
+                    } else {
+//                        sap.setAcro6Layers(false);
+                        sap.setEnableLayer1(true, null);
+                        sap.setEnableLayer4(true, checkTextPosition);
+                    }
+                    sap.setLayer2Text("");
+                    PdfTemplate n2 = sap.getLayer(0);
+                    //Image img = params.getCustom_image();
+                    img.scaleToFit(rectangle.getWidth(), rectangle.getHeight());
+                    img.setAbsolutePosition(0, 0);
+                    img.setAlignment(Image.MIDDLE);
+                    n2.addImage(img);
+                }
+            } else {
+                // Text only
+            	/*
+                 * Option to show CN, DATE, REASON,LOCATION
+                 *
+                 *
+                 */
+
+                // VISUAL STATUS
+                if (!isShowVisualStatus) {
+//                    sap.setAcro6Layers(true);
+                    sap.setEnableLayer1(false, null); //checkMarkPosition
+                    sap.setEnableLayer4(false, checkTextPosition); //checkTextPosition
+                } else {
+//                    sap.setAcro6Layers(false);
+                    sap.setEnableLayer1(true, null);
+                    sap.setEnableLayer4(true, checkTextPosition);
+                }
+
+                PdfTemplate n2 = sap.getLayer(2);
+                ColumnText ct = new ColumnText(n2);
+                ct.setSimpleColumn(
+                        n2.getBoundingBox().getLeft(),
+                        n2.getBoundingBox().getBottom(),
+                        n2.getBoundingBox().getRight(),
+                        n2.getBoundingBox().getTop());
+
+                ct.setExtraParagraphSpace(0);
+                ct.setLeading(0);
+
+                PdfPTable sigTable = new PdfPTable(1);
+                sigTable.setSpacingAfter(0);
+                sigTable.setSpacingBefore(0);
+                sigTable.setWidthPercentage(100);
+                sigTable.setWidths(new int[]{1});
+
+                //BLOCK TEXT
+                PdfPCell textCell = new PdfPCell();
+                textCell.setBorder(Rectangle.NO_BORDER);
+                textCell.setNoWrap(false);
+                textCell.setVerticalAlignment(Element.ALIGN_TOP);
+                textCell.setHorizontalAlignment(Element.ALIGN_LEFT);
+
+
+                String text = "\n\n\n";
+                // Add CN
+                if (isShowSignerInfo) {
+                    // extract commom name
+                    X500Name x500name = new JcaX509CertificateHolder(x509).getSubject();
+                    RDN cn = x500name.getRDNs(BCStyle.CN)[0];
+                    String commonName = IETFUtils.valueToString(cn.getFirst().getValue());
+                    if (signerInfoPrefix == null) {
+                        signerInfoPrefix = params.getSignerInfoPrefix();
+                        if (signerInfoPrefix == null) {
+                            // no prefix
+                            text += commonName;
+                            text += "\n";
+                        } else {
+                            // prefix used
+                            text += signerInfoPrefix + " " + commonName;
+                            text += "\n";
+                        }
+                    } else {
+                        // prefix used
+                        text += signerInfoPrefix + " " + commonName;
+                        text += "\n";
+                    }
+                }
+
+                // Add Datetime
+                if (isShowDateTime) {
+                    //DateFormat formatter = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+                    //String signDateTime = formatter.format(cal.getTime());
+                    String signDateTime = getDatetimeFormat(cal.getTime(), datetimeFormat);
+                    if (dateTimePrefix == null) {
+                        dateTimePrefix = params.getDateTimePrefix();
+                        if (dateTimePrefix == null) {
+                            // no prefix
+                            text += signDateTime;
+                            text += "\n";
+                        } else {
+                            //prefix used
+                            text += dateTimePrefix + " " + signDateTime;
+                            text += "\n";
+                        }
+                    } else {
+                        // prefix used
+                        text += dateTimePrefix + " " + signDateTime;
+                        text += "\n";
+                    }
+                }
+                // Add Reason
+                if (isShowReason) {
+                    if (signReasonPrefix == null) {
+                        signReasonPrefix = params.getSignReasonPrefix();
+                        if (signReasonPrefix == null) {
+                            // no prefix
+                            text += signReason;
+                            text += "\n";
+                        } else {
+                            // prefix used
+                            text += signReasonPrefix + " " + signReason;
+                            text += "\n";
+                        }
+                    } else {
+                        // prefix used
+                        text += signReasonPrefix + " " + signReason;
+                        text += "\n";
+                    }
+                }
+                // Add location
+                if (isShowLocation) {
+                    if (locationPrefix == null) {
+                        locationPrefix = params.getLocationPrefix();
+                        if (locationPrefix == null) {
+                            // no prefix
+                            text += location;
+                            text += "\n";
+                        } else {
+                            // prefix used
+                            text += locationPrefix + " " + location;
+                            text += "\n";
+                        }
+                    } else {
+                        // prefix used
+                        text += locationPrefix + " " + location;
+                        //text += "\n"; # no need to break the line
+                    }
+                }
+
+                BaseFont bf = BaseFont.createFont(EXTERN_FONT, BaseFont.IDENTITY_H, BaseFont.EMBEDDED);
+                Font textFont = new Font(bf, MAXFONTSIZE, Font.NORMAL, txtColor);
+
+                float finalFontSize = fitText(textFont, text, rectangle, MAXFONTSIZE, PdfWriter.RUN_DIRECTION_RTL);
+
+                Paragraph p = new Paragraph();
+                p.add(new Phrase(new Chunk(text, textFont)));
+                p.setAlignment(Element.ALIGN_LEFT);
+                p.setSpacingAfter(0);
+                p.setSpacingAfter(0);
+                p.setLeading(finalFontSize);
+                textCell.addElement(p);
+                sigTable.addCell(textCell);
+                // add table sig
+                ct.addElement(sigTable);
+                ct.go();
+
+                /*
+                 * sap.setLayer2Font(textFont);
+                 *
+                 * String content = "";
+                 *
+                 * if(isShowSignerInfoOnly ^ isShowDateTimeOnly) {
+                 * if(isShowSignerInfoOnly) { content =
+                 * (signerInfoPrefix!=null?signerInfoPrefix:params.getSignerInfoPrefix())
+                 * + getSubjectName(x509.getSubjectDN().getName()); } else {
+                 * content =
+                 * (dateTimePrefix!=null?dateTimePrefix:params.getDateTimePrefix())+formatter.format(cal.getTime());
+                 * } } else { content =
+                 * (signerInfoPrefix!=null?signerInfoPrefix:params.getSignerInfoPrefix())
+                 * + getSubjectName(x509.getSubjectDN().getName()) +"\n"
+                 * +(dateTimePrefix!=null?dateTimePrefix:params.getDateTimePrefix())+formatter.format(cal.getTime());
+                 * }
+                 *
+                 * if(isReasonDefault) { content +=
+                 * "\n"+(signReasonPrefix!=null?signReasonPrefix:params.getSignReasonPrefix())+signReason;
+                 * } sap.setLayer2Text(content);
+                 *
+                 * if(!isShowVisualStatus) { sap.setAcro6Layers(true); } else {
+                 * sap.setAcro6Layers(false); } sap.setImage(null);
+                 */
+            }
+        }
+
+        // Certification level
+        sap.setCertificationLevel(params.getCertification_level());
+
+        PdfSignature dic = new PdfSignature(PdfName.ADOBE_PPKLITE, new PdfName(
+                "adbe.pkcs7.detached"));
+
+        dic.setReason(signReason);
+        dic.setLocation(location);
+        dic.setDate(new PdfDate(cal));
+
+        sap.setCryptoDictionary(dic);
+
+        // add timestamp to signature if requested
+        /*
+         * TSAClient tsc = null; if (tsaProvider == null) { if
+         * (params.getTSAProvider() != null) { //tsc =
+         * getTimeStampClient(params.getTsa_url(), params.getTsa_username(),
+         * params.getTsa_password()); tsc = getTimeStampClient(channelName,
+         * user, params.getTSAProvider(), trustedhubTransId); } } else { tsc =
+         * getTimeStampClient(channelName, user, tsaProvider,
+         * trustedhubTransId); }
+         */
+        TSAClient tsc = null;
+        if (params.getTsa_url() != null) {
+            tsc = getTimeStampClient(params.getTsa_url(), params.getTsa_username(), params.getTsa_password());
+        }
+        // embed ocsp response in cms package if requested
+        // for ocsp request to be formed there needs to be issuer certificate in
+        // chain
+        byte[] ocsp = null;
+        if (params.isEmbed_ocsp_response() && certChain.length >= 2) {
+            String url;
+            try {
+                url = getOCSPURL((X509Certificate) certChain[0]);
+                if (url != null && url.length() > 0) {
+                    OcspClientBouncyCastle ocspClientBouncyCastle = new OcspClientBouncyCastle();
+                    ocsp = ocspClientBouncyCastle.getEncoded(
+                            (X509Certificate) certChain[0],
+                            (X509Certificate) certChain[1], url);
+                }
+            } catch (CertificateParsingException e) {
+                throw new CertificateParsingException("Error getting OCSP URL from certificate", e);
+            }
+
+        }
+
+        //PdfPKCS7_v4 sgn = new PdfPKCS7_v4(privKey, certChain, crlList, hashAlog, null, false); // check
+        ExternalDigest externalDigest = new BouncyCastleDigest();
+        PdfPKCS7_v4 sgn = new PdfPKCS7_v4(privKey, certChain, hashAlog, provider, externalDigest, false);
+
+        MessageDigest messageDigest;
+
+        try {
+            messageDigest = MessageDigest.getInstance(hashAlog);
+        } catch (NoSuchAlgorithmException e) {
+            ResponseCode = Defines.CODE_PDFHASHALG;
+            ResponseMessage = Defines.ERROR_PDFHASHALG;
+            return null;
+            //throw new SignServerException("Error creating hashAlog digest", e);
+        }
+
+
+
+        // calculate signature size
+        if (contentEstimated == 0) {
+            contentEstimated =
+                    calculateEstimatedSignatureSize(certChain, tsc, ocsp, crlList);
+        }
+        if (contentEstimated == -1) {
+            return null;
+        }
+
+        byte[] encodedSig = calculateSignature(sgn, contentEstimated, messageDigest, cal, params, certChain, tsc, ocsp, sap);
+        if (encodedSig == null) {
+            return null;
+        }
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Estimated size: " + contentEstimated);
+            LOG.debug("Encoded length: " + encodedSig.length);
+        }
+
+        if (contentEstimated + 2 < encodedSig.length) {
+            if (!secondTry) {
+                int contentExact = encodedSig.length;
+                LOG.warn("Estimated signature size too small, usinging accurate calculation (resulting in an extra signature computation).");
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("Estimated size: " + contentEstimated + ", actual size: " + contentExact);
+                }
+
+                // try signing again
+                return addSignatureToPDFDocument(params, pdfbytes, password, signaturePro, contentExact, certs, x509, privKey, channelName, user, trustedhubTransId, provider);
+            } else {
+                // if we fail to get an accurate signature size on the second attempt, bail out (this shouldn't happen)
+                ResponseCode = Defines.CODE_PDFCALSIGNSIZE;
+                ResponseMessage = Defines.ERROR_PDFCALSIGNSIZE;
+                return null;
+                //throw new SignServerException("Failed to calculate signature size");
+            }
+        }
+
+        byte[] paddedSig = new byte[contentEstimated];
+        System.arraycopy(encodedSig, 0, paddedSig, 0, encodedSig.length);
+
+        PdfDictionary dic2 = new PdfDictionary();
+        dic2.put(PdfName.CONTENTS, new PdfString(paddedSig).setHexWriting(true));
+        sap.close(dic2);
+        reader.close();
+
+        fout.close();
+        ResponseCode = Defines.CODE_SUCCESS;
+        ResponseMessage = Defines.SUCCESS;
+        return fout.toByteArray();
+    }
+
+    /**
+     * returns crl list containing crl for each certifcate in crl chain. CRLs
+     * are fetched using address specified in CDP.
+     *
+     * @return n
+     * @throws SignServerException
+     */
+    private CRL[] getCrlsForChain(final Collection<Certificate> certChain)
+            throws SignServerException {
+
+        java.util.List<CRL> retCrls = new ArrayList<CRL>();
+        for (Certificate currCert : certChain) {
+            CRL currCrl = null;
+            try {
+                URL currCertURL = getCRLDistributionPoint(currCert);
+                if (currCertURL == null) {
+                    continue;
+                }
+
+                currCrl = ValidationUtils.fetchCRLFromURL(currCertURL);
+            } catch (CertificateParsingException e) {
+                ResponseCode = Defines.CODE_PDFGETCDP;
+                ResponseMessage = Defines.ERROR_PDFGETCDP;
+                isRetCrlsNull = true;
+                return null;
+                //throw new SignServerException("Error obtaining CDP from signing certificate", e);
+            }
+
+            retCrls.add(currCrl);
+        }
+
+        if (retCrls.isEmpty()) {
+            isRetCrlsNull = false;
+            return null;
+        } else {
+            isRetCrlsNull = false;
+            return retCrls.toArray(new CRL[0]);
+        }
+
+    }
+
+    static URL getCRLDistributionPoint(final Certificate certificate)
+            throws CertificateParsingException {
+        return org.signserver.module.pdfsigner.org.ejbca.util.CertTools.getCrlDistributionPoint(certificate);
+    }
+
+    /**
+     * get the page number at which to draw signature rectangle
+     *
+     * @param pReader
+     * @param pParams
+     * @return
+     */
+    private int getPageNumberForSignature(PdfReader pReader,
+            PDFSignerParameters pParams) {
+        int totalNumOfPages = pReader.getNumberOfPages();
+        if (pParams.getVisible_sig_page().trim().equals("First")) {
+            return 1;
+        } else if (pParams.getVisible_sig_page().trim().equals("Last")) {
+            return totalNumOfPages;
+        } else {
+            try {
+                int pNum = Integer.parseInt(pParams.getVisible_sig_page());
+                if (pNum < 1) {
+                    return 1;
+                } else if (pNum > totalNumOfPages) {
+                    return totalNumOfPages;
+                } else {
+                    return pNum;
+                }
+            } catch (NumberFormatException ex) {
+                // not a numeric argument draw on first line
+                return 1;
+            }
+        }
+    }
+    /*
+     * private void archiveToDisk(ISignRequest sReq, byte[] signedbytes,
+     * RequestContext requestContext) throws SignServerException { if
+     * (LOG.isDebugEnabled()) { LOG.debug("Archiving to disk"); }
+     *
+     * // Fill in fields that can be used to construct path and filename final
+     * Map<String, String> fields = new HashMap<String, String>();
+     * fields.put("WORKERID", String.valueOf(workerId));
+     * fields.put("WORKERNAME", config.getProperty("NAME"));
+     * fields.put("REMOTEIP", (String)
+     * requestContext.get(RequestContext.REMOTE_IP));
+     * fields.put("TRANSACTIONID", (String)
+     * requestContext.get(RequestContext.TRANSACTION_ID));
+     * fields.put("REQUESTID", String.valueOf(sReq.getRequestID()));
+     *
+     * Object credential = requestContext.get(RequestContext.CLIENT_CREDENTIAL);
+     * if (credential instanceof UsernamePasswordClientCredential) {
+     * fields.put("USERNAME", ((UsernamePasswordClientCredential)
+     * credential).getUsername()); }
+     *
+     * final String pathFromPattern = formatFromPattern( archivetodiskPattern,
+     * config.getProperty( PROPERTY_ARCHIVETODISK_PATH_PATTERN,
+     * DEFAULT_ARCHIVETODISK_PATH_PATTERN), new Date(), fields);
+     *
+     * final File outputPath = new File(new File(config.getProperty(
+     * PROPERTY_ARCHIVETODISK_PATH_BASE)), pathFromPattern);
+     *
+     * if (!outputPath.exists()) { if (!outputPath.mkdirs()) { LOG.warn("Output
+     * path could not be created: " + outputPath.getAbsolutePath()); } }
+     *
+     * final String fileNameFromPattern = formatFromPattern(
+     * archivetodiskPattern, config.getProperty(
+     * PROPERTY_ARCHIVETODISK_FILENAME_PATTERN,
+     * DEFAULT_ARCHIVETODISK_FILENAME_PATTERN), new Date(), fields);
+     *
+     * final File outputFile = new File(outputPath, fileNameFromPattern);
+     *
+     * if (LOG.isDebugEnabled()) { LOG.debug("Worker[" + workerId + "]: Archive
+     * to file: " + outputFile.getAbsolutePath()); }
+     *
+     * OutputStream out = null; try { out = new FileOutputStream(outputFile);
+     * out.write(signedbytes); } catch (IOException ex) { throw new
+     * SignServerException( "Could not archive signed document", ex); } finally
+     * { if (out != null) { try { out.close(); } catch (IOException ex) {
+     * LOG.debug("Exception closing file", ex); throw new SignServerException(
+     * "Could not archive signed document", ex); } } } }
+     */
+
+    /**
+     * Helper method for formatting a text given a set of fields and a date.
+     *
+     * Sample: "${WORKERID}-${REQUESTID}_${DATE:yyyy-MM-dd}.pdf" Could be:
+     * "42-123123123_2010-04-28.pdf"
+     *
+     * @param pattern Pre-compiled pattern to use for parsing
+     * @param text The text that contains keys to be replaced with values
+     * @param date The date to use if date should be inserted
+     * @param fields Keys and their values that should be used if they exist in
+     * the text.
+     * @return The test with keys replaced with values from fields or by
+     * formatted date
+     * @see java.text.SimpleDateFormat
+     */
+    static String formatFromPattern(final Pattern pattern, final String text,
+            final Date date, final Map<String, String> fields) {
+        final String result;
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Input string: " + text);
+        }
+
+        final StringBuffer sb = new StringBuffer();
+        Matcher m = pattern.matcher(text);
+        while (m.find()) {
+            // when the pattern is ${identifier}, group 0 is 'identifier'
+            final String key = m.group(1);
+
+            final String value;
+            if (key.startsWith("DATE:")) {
+                final SimpleDateFormat sdf = new SimpleDateFormat(
+                        key.substring("DATE:".length()).trim());
+                value = sdf.format(date);
+            } else {
+                value = fields.get(key);
+            }
+
+            // if the pattern does exists, replace it by its value
+            // otherwise keep the pattern ( it is group(0) )
+            if (value != null) {
+                m.appendReplacement(sb, value);
+            } else {
+                // I'm doing this to avoid the backreference problem as there will be a $
+                // if I replace directly with the group 0 (which is also a pattern)
+                m.appendReplacement(sb, "");
+                final String unknown = m.group(0);
+                sb.append(unknown);
+            }
+        }
+        m.appendTail(sb);
+        result = sb.toString();
+
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("Result: " + result);
+        }
+        return result;
+    }
+    /*
+     * private void checkForDuplicateObjects(byte[] pdfbytes) throws
+     * IOException, SignServerException { if (LOG.isDebugEnabled()) {
+     * LOG.debug(">checkForDuplicateObjects"); } final PRTokeniser tokens = new
+     * PRTokeniser(pdfbytes); final Set<String> idents = new HashSet<String>();
+     * final byte[] line = new byte[16];
+     *
+     * while (tokens.readLineSegment(line)) { final int[] obj =
+     * PRTokeniser.checkObjectStart(line); if (obj != null) { final String ident
+     * = obj[0] + " " + obj[1];
+     *
+     * if (idents.add(ident)) { if (LOG.isDebugEnabled()) { LOG.debug("Object: "
+     * + ident); } } else { if (LOG.isDebugEnabled()) { LOG.debug("Duplicate
+     * object: " + ident); } throw new SignServerException("Incorrect
+     * document"); } } } if (LOG.isDebugEnabled()) {
+     * LOG.debug("<checkForDuplicateObjects"); } }
+     */
+
+    private static byte[] getPassword(final RequestContext context) throws UnsupportedEncodingException {
+        final byte[] result;
+        String password = RequestMetadata.getInstance(context).get(RequestContext.METADATA_PDFPASSWORD);
+        if (password == null) {
+            password = RequestMetadata.getInstance(context).get(RequestContext.METADATA_pDFPASSWORD);
+        }
+        if (password == null) {
+            result = null;
+        } else {
+            result = password.getBytes("ISO-8859-1");
+        }
+        return result;
+    }
+
+    /**
+     * @return True if the supplied password is equal to the user password and
+     * thus is not the owner password.
+     */
+    private boolean isUserPassword(PdfReader reader, byte[] password) {
+        return Arrays.equals(reader.computeUserPassword(), password);
+    }
+
+    protected TSAClient getTimeStampClient(String url, String username, String password) {
+        return new TSAClientBouncyCastle(url, username, password);
+    }
+
+//    protected TSAClient getTimeStampClient(String channelName, String user, String tsaProvider, int trustedhubTransId) {
+//        return new TSAClientEndpoint(channelName, user, tsaProvider, trustedhubTransId);
+//    }
+    private String getSubjectName(String DN) {
+        String issuer = DN;
+        String issuerName = "";
+        String[] pairs = issuer.split(",");
+        for (String pair : pairs) {
+            String[] paramvalue = pair.split("=");
+            if (paramvalue[0].compareTo("CN") == 0 || paramvalue[0].compareTo(" CN") == 0) {
+                issuerName = paramvalue[1];
+                break;
+            }
+        }
+
+        return issuerName;
+    }
+
+    private BaseColor getColor(String color) {
+
+        if (color.compareToIgnoreCase("yellow") == 0) {
+            return BaseColor.YELLOW;
+        } else if (color.compareToIgnoreCase("blue") == 0) {
+            return BaseColor.BLUE;
+        } else if (color.compareToIgnoreCase("cyan") == 0) {
+            return BaseColor.CYAN;
+        } else if (color.compareToIgnoreCase("dark_gray") == 0) {
+            return BaseColor.DARK_GRAY;
+        } else if (color.compareToIgnoreCase("gray") == 0) {
+            return BaseColor.GRAY;
+        } else if (color.compareToIgnoreCase("green") == 0) {
+            return BaseColor.GREEN;
+        } else if (color.compareToIgnoreCase("light_gray") == 0) {
+            return BaseColor.LIGHT_GRAY;
+        } else if (color.compareToIgnoreCase("magenta") == 0) {
+            return BaseColor.MAGENTA;
+        } else if (color.compareToIgnoreCase("orange") == 0) {
+            return BaseColor.ORANGE;
+        } else if (color.compareToIgnoreCase("pink") == 0) {
+            return BaseColor.PINK;
+        } else if (color.compareToIgnoreCase("red") == 0) {
+            return BaseColor.RED;
+        } else if (color.compareToIgnoreCase("white") == 0) {
+            return BaseColor.WHITE;
+        } else {
+            return BaseColor.BLACK;
+        }
+    }
+
+    private float fitText(Font font, String text, Rectangle rect, float maxFontSize, int runDirection) {
+        try {
+            ColumnText ct = null;
+            int status = 0;
+            if (maxFontSize <= 0) {
+                int cr = 0;
+                int lf = 0;
+                char t[] = text.toCharArray();
+                for (int k = 0; k < t.length; ++k) {
+                    if (t[k] == '\n') {
+                        ++lf;
+                    } else if (t[k] == '\r') {
+                        ++cr;
+                    }
+                }
+                int minLines = Math.max(cr, lf) + 1;
+                maxFontSize = Math.abs(rect.getHeight()) / minLines - 0.001f;
+            }
+            font.setSize(maxFontSize);
+            Phrase ph = new Phrase(text, font);
+            ct = new ColumnText(null);
+            ct.setSimpleColumn(ph, rect.getLeft(), rect.getBottom(), rect.getRight(), rect.getTop(), maxFontSize, Element.ALIGN_LEFT);
+            ct.setRunDirection(runDirection);
+            status = ct.go(true);
+            if ((status & ColumnText.NO_MORE_TEXT) != 0) {
+                return maxFontSize;
+            }
+            float precision = 0.5f;
+            float min = 0;
+            float max = maxFontSize;
+            float size = maxFontSize;
+            for (int k = 0; k < 50; ++k) { //just in case it doesn't converge
+                size = (min + max) / 2;
+                ct = new ColumnText(null);
+                font.setSize(size);
+                ct.setSimpleColumn(new Phrase(text, font), rect.getLeft(), rect.getBottom(), rect.getRight(), rect.getTop(), size, Element.ALIGN_LEFT);
+                ct.setRunDirection(runDirection);
+                status = ct.go(true);
+                if ((status & ColumnText.NO_MORE_TEXT) != 0) {
+                    if (max - min < size * precision) {
+                        return size;
+                    }
+                    min = size;
+                } else {
+                    max = size;
+                }
+            }
+            return size;
+        } catch (Exception e) {
+            throw new ExceptionConverter(e);
+        }
+    }
+
+    private String getTextDirection(String direction) {
+        if (direction.compareTo(TEXT_DIRECTION_LEFTTORIGHT) != 0
+                && direction.compareTo(TEXT_DIRECTION_RIGHTTOLEFT) != 0
+                && direction.compareTo(TEXT_DIRECTION_TOPTOBOTTOM) != 0
+                && direction.compareTo(TEXT_DIRECTION_BOTTOMTOTOP) != 0
+                && direction.compareTo(TEXT_DIRECTION_OVERLAP) != 0) {
+            return TEXT_DIRECTION_LEFTTORIGHT;
+        }
+        return direction;
+    }
+
+    private static ASN1Object getExtensionValue(X509Certificate cert, String oid) throws IOException {
+        byte[] bytes = cert.getExtensionValue(oid);
+        if (bytes == null) {
+            return null;
+        }
+        ASN1InputStream aIn = new ASN1InputStream(new ByteArrayInputStream(bytes));
+        ASN1OctetString octs = (ASN1OctetString) aIn.readObject();
+        aIn = new ASN1InputStream(new ByteArrayInputStream(octs.getOctets()));
+        return aIn.readObject();
+    }
+
+    private static String getStringFromGeneralName(ASN1Object names) throws IOException {
+        DERTaggedObject taggedObject = (DERTaggedObject) names;
+        return new String(ASN1OctetString.getInstance(taggedObject, false).getOctets(), "ISO-8859-1");
+    }
+
+    private static String getOCSPURL(X509Certificate certificate) throws CertificateParsingException {
+        try {
+            ASN1Object obj = getExtensionValue(certificate, org.bouncycastle.asn1.x509.X509Extension.authorityInfoAccess.getId());
+            if (obj == null) {
+                return null;
+            }
+
+            ASN1Sequence AccessDescriptions = (ASN1Sequence) obj;
+            for (int i = 0; i < AccessDescriptions.size(); i++) {
+                ASN1Sequence AccessDescription = (ASN1Sequence) AccessDescriptions.getObjectAt(i);
+                if (AccessDescription.size() != 2) {
+                    continue;
+                } else {
+                    if ((AccessDescription.getObjectAt(0) instanceof DERObjectIdentifier) && ((DERObjectIdentifier) AccessDescription.getObjectAt(0)).getId().equals("1.3.6.1.5.5.7.48.1")) {
+                        String AccessLocation = getStringFromGeneralName((ASN1Object) AccessDescription.getObjectAt(1));
+                        if (AccessLocation == null) {
+                            return "";
+                        } else {
+                            return AccessLocation;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+        }
+        return null;
+    }
+
+    private static String getDatetimeFormat(Date date, String format) {
+        if (format != null) {
+            try {
+                SimpleDateFormat sdf = new SimpleDateFormat(format);
+                return sdf.format(date);
+            } catch (Exception e) {
+                try {
+                    SimpleDateFormat sdf = new SimpleDateFormat(DEFAULT_DATETIME_FORMAT);
+                    return sdf.format(date);
+                } catch (Exception ex) {
+                    return null;
+                }
+            }
+        } else {
+            try {
+                SimpleDateFormat sdf = new SimpleDateFormat(DEFAULT_DATETIME_FORMAT);
+                return sdf.format(date);
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+    }
+}
