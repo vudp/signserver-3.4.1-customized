@@ -1,3 +1,8 @@
+## Get started
+
+You can find the original project version from https://www.signserver.org/
+This project is adapted for my usage.
+
 ## Requirements
 
 * Java 1.7.x
