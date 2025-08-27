@@ -1,6 +1,6 @@
 ## Get started
 
-You can find the original project version from https://www.signserver.org/
+You can find the original project version from https://www.signserver.org/. Correct version could be found at https://sourceforge.net/projects/signserver/files/signserver/3.4/
 This project is adapted for my usage.
 
 ## Requirements
