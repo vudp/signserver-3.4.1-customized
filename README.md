@@ -6,7 +6,7 @@
 * Ant 1.9.1
 
 ## Set your variables environment
-
+<pre>
 JAVA_HOME=/usr/java/latest
 export JAVA_HOME
 PATH=$JAVA_HOME/bin:$PATH
@@ -28,5 +28,17 @@ export ANT_OPTS="-Xmx512m -XX:MaxPermSize=512m"
 export JAVA_OPTS="-Xmx6G -Xms2G -XX:PermSize=512m -XX:MaxPermSize=1024m -server"
 export SIGNSERVER_NODEID=localhost
 export APPSRV_HOME=/opt/CAG360/EnterprisePlatform-5.2.0/jboss-eap-5.2/jboss-as
+</pre>
 
-
+## Build & Deploy
+<pre>
+  cd $SIGNSERVER_HOME
+  bin/ant clean
+  bin/ant build
+  bin/ant deploy
+</pre>
+## Run
+Start your JBoss service
+<pre>
+  service jboss start
+</pre>
